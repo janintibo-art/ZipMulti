@@ -1,0 +1,106 @@
+name: Build ZipMulti Android + Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android platform files
+        run: |
+          flutter create . --platforms=android --project-name zip_multi --org com.zipmulti
+          # flutter create recree test/widget_test.dart, qui reference MyApp et
+          # fait echouer flutter analyze / flutter test sur ce projet.
+          rm -f test/widget_test.dart
+
+      - name: Enable Android ZIP open/share intents
+        run: python3 tool/patch_android_manifest.py
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Tests
+        run: flutter test
+
+      - name: Build APK release
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZipMulti-v0.3-Android-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  windows:
+    name: Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Windows platform files
+        shell: bash
+        run: |
+          flutter create . --platforms=windows --project-name zip_multi --org com.zipmulti
+          rm -f test/widget_test.dart
+
+      - name: Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Tests
+        run: flutter test
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Upload portable Windows application
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZipMulti-v0.3-Windows-Portable
+          path: build/windows/x64/runner/Release/**
+          if-no-files-found: error
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer EXE
+        shell: powershell
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\zipmulti.iss'
+
+      - name: Upload Windows installer EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZipMulti-v0.3-Windows-Setup-EXE
+          path: installer/output/ZipMulti-Setup.exe
+          if-no-files-found: error
