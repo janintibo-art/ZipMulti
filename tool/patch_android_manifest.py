@@ -57,3 +57,17 @@ elif groovy.exists():
     groovy.write_text(gradle, encoding='utf-8')
 
 print('Android patché : ouverture/partage ZIP + minSdk 24 pour ZipMulti.')
+
+# receive_sharing_intent exige compileSdk 37, alors que flutter create genere 36.
+if kts.exists():
+    gradle = kts.read_text(encoding='utf-8')
+    gradle = re.sub(r'(?m)^\s*compileSdk\s*=\s*flutter\.compileSdkVersion\s*$',
+                    '    compileSdk = 37', gradle)
+    kts.write_text(gradle, encoding='utf-8')
+    print('compileSdk force a 37.')
+elif groovy.exists():
+    gradle = groovy.read_text(encoding='utf-8')
+    gradle = re.sub(r'(?m)^\s*compileSdkVersion\s+flutter\.compileSdkVersion\s*$',
+                    '    compileSdkVersion 37', gradle)
+    groovy.write_text(gradle, encoding='utf-8')
+    print('compileSdk force a 37.')
