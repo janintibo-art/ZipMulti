@@ -25,7 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const _tutorialSeenKey = 'tutorial_seen_v03';
 
   final _service = ZipMultiService();
-  final _preferences = SharedPreferencesAsync();
+  SharedPreferencesAsync get _preferences => SharedPreferencesAsync();
   final _nameController = TextEditingController(text: 'partage');
   final _sizeController = TextEditingController(text: '100');
 
