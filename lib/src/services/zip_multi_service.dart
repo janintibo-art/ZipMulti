@@ -46,6 +46,10 @@ class ZipMultiService {
   static const String partsRoot = '__zipmulti_parts__';
   static const int formatVersion = 2;
 
+  /// Part de la progression consacree a l'analyse et au decoupage ; le reste
+  /// revient a l'ecriture des volumes.
+  static const double _analysisWeight = 0.45;
+
   /// Écriture disque forcée toutes les 8 Mo pendant le découpage.
   static const int _flushInterval = 8 * 1024 * 1024;
 
@@ -84,6 +88,7 @@ class ZipMultiService {
     required int maxBytes,
     required bool advancedSplit,
     void Function(String message)? onProgress,
+    void Function(double fraction)? onFraction,
   }) async {
     if (files.isEmpty) {
       throw ZipMultiException('Aucun fichier sélectionné.');
@@ -106,6 +111,26 @@ class ZipMultiService {
       final manifestFiles = <Map<String, Object?>>[];
       final usedNames = <String>{};
       final setId = _newSetId(safeBaseName);
+
+      // La progression se mesure en octets et non en nombre de fichiers : un lot
+      // contient souvent un fichier enorme et beaucoup de petits, et compter les
+      // fichiers donnerait une barre qui saute puis reste bloquee.
+      var totalSourceBytes = 0;
+      for (final source in files) {
+        try {
+          totalSourceBytes += await source.length();
+        } catch (_) {
+          // Fichier illisible : il sera de toute facon ignore plus bas.
+        }
+      }
+      if (totalSourceBytes <= 0) totalSourceBytes = 1;
+      var analyzedBytes = 0;
+      void reportAnalysis() {
+        final done = (analyzedBytes / totalSourceBytes).clamp(0.0, 1.0);
+        onFraction?.call(_analysisWeight * done);
+      }
+
+      onFraction?.call(0);
 
       for (var fileIndex = 0; fileIndex < files.length; fileIndex++) {
         final source = files[fileIndex];
@@ -132,6 +157,8 @@ class ZipMultiService {
             'size': stat.size,
             'sha256': hash,
           });
+          analyzedBytes += stat.size;
+          reportAnalysis();
           continue;
         }
 
@@ -188,6 +215,8 @@ class ZipMultiService {
             'size': size,
             'sha256': hash,
           });
+          analyzedBytes += size;
+          reportAnalysis();
         }
 
         await openChunk();
@@ -266,6 +295,10 @@ class ZipMultiService {
         flush: true,
       );
 
+      final plannedBytes =
+          max(1, planned.fold<int>(0, (sum, entry) => sum + entry.size));
+      var writtenBytes = 0;
+
       for (var i = 0; i < groups.length; i++) {
         final number = i + 1;
         final volumePath = p.join(
@@ -298,6 +331,9 @@ class ZipMultiService {
             entry.archiveName,
             DeflateLevel.bestSpeed,
           );
+          writtenBytes += entry.size;
+          final done = (writtenBytes / plannedBytes).clamp(0.0, 1.0);
+          onFraction?.call(_analysisWeight + (1 - _analysisWeight) * done);
         }
         await encoder.close();
 
@@ -314,6 +350,7 @@ class ZipMultiService {
         }
       }
 
+      onFraction?.call(1);
       return ZipMultiResult(
         volumes: List.unmodifiable(createdVolumes),
         filesProcessed: manifestFiles.length,
@@ -340,6 +377,7 @@ class ZipMultiService {
     required List<File> selectedVolumes,
     required Directory destination,
     void Function(String message)? onProgress,
+    void Function(double fraction)? onFraction,
   }) async {
     if (selectedVolumes.isEmpty) {
       throw ZipMultiException('Aucun ZIP sélectionné.');
@@ -381,6 +419,18 @@ class ZipMultiService {
 
     final temp = await Directory.systemTemp.createTemp('zipmulti_extract_');
     try {
+      var totalVolumeBytes = 0;
+      for (final volume in volumes) {
+        try {
+          totalVolumeBytes += await volume.length();
+        } catch (_) {
+          // Volume illisible : signale plus bas par l'extraction elle-meme.
+        }
+      }
+      if (totalVolumeBytes <= 0) totalVolumeBytes = 1;
+      var readBytes = 0;
+      onFraction?.call(0);
+
       final extractedRoots = <Directory>[];
       final acceptedVolumes = <File>[];
       Map<String, dynamic>? manifest;
@@ -394,6 +444,14 @@ class ZipMultiService {
         await root.create(recursive: true);
         onProgress?.call('Lecture du volume ${i + 1}/${volumes.length} : ${p.basename(volume.path)}');
         await extractFileToDisk(volume.path, root.path);
+        try {
+          readBytes += await volume.length();
+        } catch (_) {
+          // La progression reste simplement figee pour ce volume.
+        }
+        onFraction?.call(
+          _analysisWeight * (readBytes / totalVolumeBytes).clamp(0.0, 1.0),
+        );
 
         final manifestFile = File(p.join(root.path, manifestName));
         final volumeInfoFile = File(p.join(root.path, volumeInfoName));
@@ -454,6 +512,7 @@ class ZipMultiService {
         for (final root in extractedRoots) {
           await _copyDirectoryContents(root, destination);
         }
+        onFraction?.call(1);
         return ZipMultiResult(
           volumes: volumes,
           message: '${volumes.length} ZIP classique(s) extrait(s).',
@@ -503,6 +562,15 @@ class ZipMultiService {
       if (files is! List) {
         throw ZipMultiException('Liste de fichiers absente du manifeste ZipMulti.');
       }
+
+      var totalOutputBytes = 0;
+      for (final raw in files) {
+        if (raw is! Map) continue;
+        final declared = _asInt(raw['size']);
+        if (declared != null) totalOutputBytes += declared;
+      }
+      if (totalOutputBytes <= 0) totalOutputBytes = 1;
+      var rebuiltBytes = 0;
 
       var reconstructed = 0;
       for (var fileIndex = 0; fileIndex < files.length; fileIndex++) {
@@ -561,8 +629,13 @@ class ZipMultiService {
         } else {
           throw ZipMultiException('Type de fichier ZipMulti inconnu : $kind');
         }
+        rebuiltBytes += _asInt(item['size']) ?? 0;
+        final done = (rebuiltBytes / totalOutputBytes).clamp(0.0, 1.0);
+        onFraction?.call(_analysisWeight + (1 - _analysisWeight) * done);
         reconstructed++;
       }
+
+      onFraction?.call(1);
 
       return ZipMultiResult(
         volumes: volumes,

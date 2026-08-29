@@ -36,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _extractDirectory;
   bool _smartSplit = true;
   bool _busy = false;
+  double? _progress;
   int _section = 0;
   String _status = 'Prêt à créer ou reconstruire un lot ZipMulti.';
   StreamSubscription<List<SharedMediaFile>>? _sharingSubscription;
@@ -125,7 +126,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickInputFiles() async {
-    setState(() => _status = 'Sélection en cours, patientez…');
+    setState(() {
+      _busy = true;
+      _progress = null;
+      _status = 'Sélection en cours, patientez…';
+    });
     final picked = await FilePicker.pickFiles(
       dialogTitle: 'Choisir les fichiers à compresser',
       allowMultiple: true,
@@ -136,6 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final bytes = await _measure(files);
     if (!mounted) return;
     setState(() {
+      _busy = false;
       _files = files;
       _inputBytes = bytes;
       _status = '${files.length} fichier(s) sélectionné(s) — ${_formatBytes(bytes)}.';
@@ -154,7 +160,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickZipVolumes() async {
-    setState(() => _status = 'Sélection en cours, patientez…');
+    setState(() {
+      _busy = true;
+      _progress = null;
+      _status = 'Sélection en cours, patientez…';
+    });
     final picked = await FilePicker.pickFiles(
       dialogTitle: 'Choisir un ZIP du lot ou plusieurs volumes',
       allowMultiple: true,
@@ -165,6 +175,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final paths = picked.map((f) => f.path).whereType<String>().toList();
     if (!mounted) return;
     setState(() {
+      _busy = false;
       _zipVolumes = paths.map(File.new).toList();
       _status = _zipVolumes.length == 1
           ? 'Un volume choisi. ZipMulti recherchera automatiquement les autres dans le même dossier.'
@@ -196,6 +207,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _busy = true;
+      _progress = 0;
       _status = 'Préparation du lot…';
     });
 
@@ -208,6 +220,9 @@ class _HomeScreenState extends State<HomeScreen> {
         advancedSplit: _smartSplit,
         onProgress: (message) {
           if (mounted) setState(() => _status = message);
+        },
+        onFraction: (fraction) {
+          if (mounted) setState(() => _progress = fraction);
         },
       );
       if (!mounted) return;
@@ -224,7 +239,12 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _progress = null;
+        });
+      }
     }
   }
 
@@ -236,6 +256,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _busy = true;
+      _progress = 0;
       _status = 'Analyse du lot et recherche des volumes…';
     });
 
@@ -245,6 +266,9 @@ class _HomeScreenState extends State<HomeScreen> {
         destination: Directory(_extractDirectory!),
         onProgress: (message) {
           if (mounted) setState(() => _status = message);
+        },
+        onFraction: (fraction) {
+          if (mounted) setState(() => _progress = fraction);
         },
       );
       if (!mounted) return;
@@ -259,7 +283,12 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _progress = null;
+        });
+      }
     }
   }
 
@@ -749,6 +778,30 @@ class _HomeScreenState extends State<HomeScreen> {
                   _status,
                   style: const TextStyle(color: Colors.white70, height: 1.35),
                 ),
+                if (_busy) ...[
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      // null pendant les phases non mesurables : la barre
+                      // defile alors au lieu d'afficher un faux pourcentage.
+                      value: _progress,
+                      minHeight: 7,
+                      backgroundColor: Colors.white.withValues(alpha: .09),
+                    ),
+                  ),
+                  if (_progress != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '${(_progress! * 100).round()} %',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
               ],
             ),
           ),
