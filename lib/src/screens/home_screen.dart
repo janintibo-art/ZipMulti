@@ -125,7 +125,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickInputFiles() async {
-    setState(() => _status = 'Sélection en cours… l'import Android peut prendre du temps');
+    setState(() => _status = 'Sélection en cours, patientez…');
     final picked = await FilePicker.pickFiles(
       dialogTitle: 'Choisir les fichiers à compresser',
       allowMultiple: true,
@@ -154,7 +154,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickZipVolumes() async {
-    setState(() => _status = 'Sélection en cours… l'import Android peut prendre du temps');
+    setState(() => _status = 'Sélection en cours, patientez…');
     final picked = await FilePicker.pickFiles(
       dialogTitle: 'Choisir un ZIP du lot ou plusieurs volumes',
       allowMultiple: true,
