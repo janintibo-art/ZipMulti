@@ -5,10 +5,10 @@ import 'dart:math';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as p;
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/storage_locations.dart';
 import '../services/zip_multi_service.dart';
 import 'tutorial_screen.dart';
 
@@ -28,14 +28,14 @@ class _HomeScreenState extends State<HomeScreen> {
   SharedPreferencesAsync get _preferences => SharedPreferencesAsync();
   final _nameController = TextEditingController(text: 'partage');
   final _sizeController = TextEditingController(text: '100');
+  final _extractNameController = TextEditingController(text: 'reconstruit');
 
   List<File> _files = [];
   int _inputBytes = 0;
   List<File> _zipVolumes = [];
-  String? _outputDirectory;
-  String? _extractDirectory;
   bool _smartSplit = true;
   bool _busy = false;
+  bool _picking = false;
   double? _progress;
   int _section = 0;
   String _status = 'Prêt à créer ou reconstruire un lot ZipMulti.';
@@ -122,13 +122,13 @@ class _HomeScreenState extends State<HomeScreen> {
     if (subscription != null) unawaited(subscription.cancel());
     _nameController.dispose();
     _sizeController.dispose();
+    _extractNameController.dispose();
     super.dispose();
   }
 
   Future<void> _pickInputFiles() async {
     setState(() {
-      _busy = true;
-      _progress = null;
+      _picking = true;
       _status = 'Sélection en cours, patientez…';
     });
     final picked = await FilePicker.pickFiles(
@@ -141,28 +141,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final bytes = await _measure(files);
     if (!mounted) return;
     setState(() {
-      _busy = false;
+      _picking = false;
       _files = files;
       _inputBytes = bytes;
       _status = '${files.length} fichier(s) sélectionné(s) — ${_formatBytes(bytes)}.';
     });
   }
 
-  Future<void> _pickOutputDirectory() async {
-    final path = await FilePicker.getDirectoryPath(
-      dialogTitle: 'Choisir le dossier de sortie',
-    );
-    if (path == null || !mounted) return;
-    setState(() {
-      _outputDirectory = path;
-      _status = 'Sortie : $path';
-    });
-  }
-
   Future<void> _pickZipVolumes() async {
     setState(() {
-      _busy = true;
-      _progress = null;
+      _picking = true;
       _status = 'Sélection en cours, patientez…';
     });
     final picked = await FilePicker.pickFiles(
@@ -175,7 +163,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final paths = picked.map((f) => f.path).whereType<String>().toList();
     if (!mounted) return;
     setState(() {
-      _busy = false;
+      _picking = false;
       _zipVolumes = paths.map(File.new).toList();
       _status = _zipVolumes.length == 1
           ? 'Un volume choisi. ZipMulti recherchera automatiquement les autres dans le même dossier.'
@@ -183,20 +171,9 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  Future<void> _pickExtractDirectory() async {
-    final path = await FilePicker.getDirectoryPath(
-      dialogTitle: 'Choisir le dossier de reconstruction',
-    );
-    if (path == null || !mounted) return;
-    setState(() {
-      _extractDirectory = path;
-      _status = 'Destination : $path';
-    });
-  }
-
   Future<void> _compress() async {
-    if (_files.isEmpty || _outputDirectory == null) {
-      _show('Sélectionnez au moins un fichier et un dossier de sortie.');
+    if (_files.isEmpty) {
+      _show('Sélectionnez au moins un fichier.');
       return;
     }
     final mb = double.tryParse(_sizeController.text.replaceAll(',', '.'));
@@ -212,9 +189,10 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
+      final target = await StorageLocations.prepare(_nameController.text);
       final result = await _service.createVolumes(
         files: _files,
-        outputDirectory: Directory(_outputDirectory!),
+        outputDirectory: target.directory,
         baseName: _nameController.text,
         maxBytes: (mb * 1024 * 1024).round(),
         advancedSplit: _smartSplit,
@@ -229,7 +207,8 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _status = result.message);
       _show(
         '${result.message}\n\n'
-        'Dossier : $_outputDirectory\n\n'
+        'Dossier : ${StorageLocations.describe(target.directory)}\n'
+        '${_locationNote(target)}\n'
         'Vous pouvez envoyer tous les ZIP du lot. Le destinataire pourra sélectionner '
         'n’importe lequel dans ZipMulti v0.3 pour lancer la reconstruction.',
         offerCopyInstructions: true,
@@ -249,8 +228,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _extract() async {
-    if (_zipVolumes.isEmpty || _extractDirectory == null) {
-      _show('Sélectionnez un ZIP du lot et un dossier de destination.');
+    if (_zipVolumes.isEmpty) {
+      _show('Sélectionnez au moins un ZIP du lot.');
       return;
     }
 
@@ -261,9 +240,10 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
+      final target = await StorageLocations.prepare(_extractNameController.text);
       final result = await _service.extractVolumes(
         selectedVolumes: _zipVolumes,
-        destination: Directory(_extractDirectory!),
+        destination: target.directory,
         onProgress: (message) {
           if (mounted) setState(() => _status = message);
         },
@@ -275,7 +255,8 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _status = result.message);
       _show(
         '${result.message}\n\n'
-        'Destination : $_extractDirectory\n\n'
+        'Destination : ${StorageLocations.describe(target.directory)}\n'
+        '${_locationNote(target)}\n'
         '${result.integrityVerified ? 'Intégrité vérifiée : OK.' : 'Extraction terminée.'}',
       );
     } on ZipMultiException catch (e) {
@@ -290,6 +271,22 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     }
+  }
+
+  /// Explique, le cas échéant, pourquoi le dossier n'est pas exactement
+  /// celui que l'utilisateur attendait.
+  String _locationNote(ResolvedDirectory target) {
+    final notes = <String>[];
+    if (target.renamed) {
+      notes.add('Un lot du même nom existait déjà : un suffixe a été ajouté.');
+    }
+    if (target.isFallback) {
+      notes.add(
+        'Android a refusé l’écriture dans Téléchargements, le lot a été placé '
+        'dans l’espace réservé à ZipMulti.',
+      );
+    }
+    return notes.isEmpty ? '' : '\n${notes.join('\n')}\n';
   }
 
   /// Mesure les fichiers une seule fois, au moment de la sélection.
@@ -313,6 +310,17 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mb == null || mb <= 0 || _totalInputBytes <= 0) return null;
     final safePayload = mb * 1024 * 1024 * 0.82;
     return max(1, (_totalInputBytes / safePayload).ceil());
+  }
+
+  /// Remplace l'icone du bouton par un rond de progression pendant l'import
+  /// Android, qui peut durer plusieurs minutes sur un gros lot.
+  Widget _pickingSpinner(Widget icon) {
+    if (!_picking) return icon;
+    return const SizedBox(
+      width: 18,
+      height: 18,
+      child: CircularProgressIndicator(strokeWidth: 2.2),
+    );
   }
 
   void _setPreset(int mb) {
@@ -563,19 +571,14 @@ class _HomeScreenState extends State<HomeScreen> {
             runSpacing: 10,
             children: [
               FilledButton.icon(
-                onPressed: _busy ? null : _pickInputFiles,
-                icon: const Icon(Icons.add_rounded),
+                onPressed: (_busy || _picking) ? null : _pickInputFiles,
+                icon: _pickingSpinner(const Icon(Icons.add_rounded)),
                 label: Text(
-                  _files.isEmpty ? 'Ajouter des fichiers' : '${_files.length} fichier(s)',
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: _busy ? null : _pickOutputDirectory,
-                icon: const Icon(Icons.folder_open_rounded),
-                label: Text(
-                  _outputDirectory == null
-                      ? 'Dossier de sortie'
-                      : p.basename(_outputDirectory!),
+                  _picking
+                      ? 'Import en cours…'
+                      : _files.isEmpty
+                          ? 'Ajouter des fichiers'
+                          : '${_files.length} fichier(s)',
                 ),
               ),
             ],
@@ -595,11 +598,15 @@ class _HomeScreenState extends State<HomeScreen> {
               final name = TextField(
                 controller: _nameController,
                 enabled: !_busy,
-                decoration: const InputDecoration(
-                  labelText: 'Nom du lot',
-                  prefixIcon: Icon(Icons.edit_outlined),
+                decoration: InputDecoration(
+                  labelText: 'Nom du lot et du dossier',
+                  prefixIcon: const Icon(Icons.drive_file_rename_outline),
                   hintText: 'partage',
+                  helperMaxLines: 2,
+                  helperText: 'Téléchargements / '
+                      '${StorageLocations.sanitizeFolderName(_nameController.text)} /',
                 ),
+                onChanged: (_) => setState(() {}),
               );
               final size = TextField(
                 controller: _sizeController,
@@ -679,24 +686,31 @@ class _HomeScreenState extends State<HomeScreen> {
             runSpacing: 10,
             children: [
               FilledButton.icon(
-                onPressed: _busy ? null : _pickZipVolumes,
-                icon: const Icon(Icons.folder_zip_outlined),
+                onPressed: (_busy || _picking) ? null : _pickZipVolumes,
+                icon: _pickingSpinner(const Icon(Icons.folder_zip_outlined)),
                 label: Text(
-                  _zipVolumes.isEmpty
-                      ? 'Choisir un ZIP du lot'
-                      : '${_zipVolumes.length} ZIP sélectionné(s)',
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: _busy ? null : _pickExtractDirectory,
-                icon: const Icon(Icons.create_new_folder_outlined),
-                label: Text(
-                  _extractDirectory == null
-                      ? 'Dossier de destination'
-                      : p.basename(_extractDirectory!),
+                  _picking
+                      ? 'Import en cours…'
+                      : _zipVolumes.isEmpty
+                          ? 'Choisir un ZIP du lot'
+                          : '${_zipVolumes.length} ZIP sélectionné(s)',
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _extractNameController,
+            enabled: !_busy,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Nom du dossier de destination',
+              prefixIcon: const Icon(Icons.drive_file_rename_outline),
+              hintText: 'reconstruit',
+              helperMaxLines: 2,
+              helperText: 'Téléchargements / '
+                  '${StorageLocations.sanitizeFolderName(_extractNameController.text)} /',
+            ),
           ),
           const SizedBox(height: 14),
           _infoStrip(
@@ -756,7 +770,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_busy)
+          if (_busy || _picking)
             const SizedBox(
               width: 22,
               height: 22,
@@ -770,7 +784,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  _busy ? 'Traitement en cours' : 'État',
+                  (_busy || _picking) ? 'Traitement en cours' : 'État',
                   style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 3),
@@ -778,7 +792,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   _status,
                   style: const TextStyle(color: Colors.white70, height: 1.35),
                 ),
-                if (_busy) ...[
+                if (_busy && _progress != null) ...[
                   const SizedBox(height: 12),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(6),

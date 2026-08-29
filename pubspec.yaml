@@ -1,7 +1,7 @@
 name: zip_multi
 description: Création de volumes ZIP standards et fractionnement avancé multi-plateforme.
 publish_to: "none"
-version: 0.3.0+3
+version: 0.3.0+4
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -13,6 +13,7 @@ dependencies:
   crypto: ^3.0.6
   file_picker: ^12.1.1
   path: ^1.9.1
+  path_provider: ^2.1.5
   receive_sharing_intent: ^1.9.0
   shared_preferences: ^2.5.5
 
