@@ -13,6 +13,7 @@ DefaultGroupName=ZipMulti
 DisableProgramGroupPage=yes
 OutputDir=output
 OutputBaseFilename=ZipMulti-Setup
+SetupIconFile=..\windows\runner\resources\app_icon.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -36,6 +36,9 @@ jobs:
       - name: Dependencies
         run: flutter pub get
 
+      - name: Application icon
+        run: dart run flutter_launcher_icons
+
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
@@ -45,11 +48,16 @@ jobs:
       - name: Build APK release
         run: flutter build apk --release
 
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/ZipMulti.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZipMulti-v0.3-Android-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: ZipMulti-Android-APK
+          path: dist/ZipMulti.apk
           if-no-files-found: error
 
   windows:
@@ -74,6 +82,9 @@ jobs:
       - name: Dependencies
         run: flutter pub get
 
+      - name: Application icon
+        run: dart run flutter_launcher_icons
+
       - name: Analyze
         run: flutter analyze --no-fatal-infos
 
@@ -83,24 +94,53 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
-      - name: Upload portable Windows application
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZipMulti-v0.3-Windows-Portable
-          path: build/windows/x64/runner/Release/**
-          if-no-files-found: error
+      - name: Package portable application
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath dist/ZipMulti-Windows-Portable.zip
 
       - name: Install Inno Setup
-        shell: powershell
+        shell: pwsh
         run: choco install innosetup --no-progress -y
 
       - name: Build Windows installer EXE
-        shell: powershell
+        shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\zipmulti.iss'
 
-      - name: Upload Windows installer EXE
+      - name: Collect installer
+        shell: pwsh
+        run: Copy-Item installer/output/ZipMulti-Setup.exe dist/ZipMulti-Setup.exe
+
+      - name: Upload Windows files
         uses: actions/upload-artifact@v4
         with:
-          name: ZipMulti-v0.3-Windows-Setup-EXE
-          path: installer/output/ZipMulti-Setup.exe
+          name: ZipMulti-Windows
+          path: dist/*
           if-no-files-found: error
+
+  release:
+    name: Publier la release
+    needs: [android, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Recuperer les fichiers compiles
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Regrouper
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -lh release
+
+      - name: Publier la release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZipMulti — Découpez. Envoyez. Reconstruisez.</title>
+<meta name="description" content="ZipMulti crée des ZIP à la taille que vous choisissez et reconstruit automatiquement les gros fichiers fractionnés, avec contrôle d'intégrité SHA-256. Android et Windows.">
+<link rel="icon" href="icon.png">
+<meta property="og:title" content="ZipMulti">
+<meta property="og:description" content="Découpez un gros fichier en ZIP standards, envoyez-les, reconstruisez automatiquement.">
+<meta property="og:image" content="icon.png">
+<style>
+  :root{
+    --bg:#07080f;
+    --bg2:#0d1020;
+    --card:#12152180;
+    --line:rgba(255,255,255,.09);
+    --txt:#eef0f8;
+    --dim:#a7adc4;
+    --violet:#8b5cf6;
+    --bleu:#38bdf8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  .glow{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(60rem 40rem at 15% -10%, rgba(139,92,246,.20), transparent 60%),
+      radial-gradient(50rem 35rem at 90% 5%, rgba(56,189,248,.14), transparent 60%),
+      radial-gradient(40rem 40rem at 50% 110%, rgba(124,58,237,.12), transparent 60%);
+  }
+  .wrap{position:relative;z-index:1;max-width:1060px;margin:0 auto;padding:0 22px}
+
+  header{padding:28px 0 0}
+  nav{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  nav img{height:42px;width:auto}
+  nav .sp{flex:1}
+  nav a{color:var(--dim);text-decoration:none;font-size:.94rem;transition:color .2s}
+  nav a:hover{color:var(--txt)}
+
+  .hero{padding:70px 0 56px;text-align:center}
+  .hero .logo{max-width:430px;width:88%;height:auto;margin-bottom:26px;
+    filter:drop-shadow(0 12px 40px rgba(139,92,246,.35))}
+  h1{font-size:clamp(2rem,6vw,3.3rem);line-height:1.12;font-weight:800;letter-spacing:-.02em}
+  h1 .g{background:linear-gradient(100deg,var(--violet),var(--bleu));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{color:var(--dim);font-size:clamp(1rem,2.4vw,1.18rem);max-width:640px;margin:18px auto 0}
+
+  .cta{display:flex;gap:13px;justify-content:center;flex-wrap:wrap;margin-top:36px}
+  .btn{
+    display:inline-flex;align-items:center;gap:10px;
+    padding:15px 26px;border-radius:14px;
+    text-decoration:none;font-weight:650;font-size:1rem;
+    border:1px solid transparent;transition:transform .18s,box-shadow .18s,background .18s;
+  }
+  .btn:hover{transform:translateY(-2px)}
+  .btn-p{background:linear-gradient(100deg,var(--violet),var(--bleu));color:#fff;
+    box-shadow:0 12px 34px -10px rgba(139,92,246,.75)}
+  .btn-p:hover{box-shadow:0 18px 44px -10px rgba(139,92,246,.9)}
+  .btn-s{background:rgba(255,255,255,.05);color:var(--txt);border-color:var(--line)}
+  .btn-s:hover{background:rgba(255,255,255,.09)}
+  .btn svg{width:20px;height:20px;flex:none}
+  .note{color:#727a94;font-size:.85rem;margin-top:18px}
+
+  section{padding:56px 0}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);font-weight:750;letter-spacing:-.01em;margin-bottom:10px}
+  .sub{color:var(--dim);margin-bottom:34px;max-width:620px}
+
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;
+    backdrop-filter:blur(8px);transition:border-color .2s,transform .2s;
+  }
+  .card:hover{border-color:rgba(139,92,246,.4);transform:translateY(-3px)}
+  .card .ic{
+    width:42px;height:42px;border-radius:12px;display:grid;place-items:center;margin-bottom:14px;
+    background:linear-gradient(135deg,rgba(139,92,246,.25),rgba(56,189,248,.18));
+    border:1px solid rgba(139,92,246,.25);
+  }
+  .card .ic svg{width:21px;height:21px;stroke:#c4b5fd}
+  .card h3{font-size:1.03rem;font-weight:700;margin-bottom:5px}
+  .card p{color:var(--dim);font-size:.94rem}
+
+  ol.steps{list-style:none;counter-reset:s;display:grid;gap:14px}
+  ol.steps li{
+    counter-increment:s;position:relative;padding:18px 20px 18px 62px;
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+  }
+  ol.steps li::before{
+    content:counter(s);position:absolute;left:18px;top:17px;
+    width:28px;height:28px;border-radius:9px;display:grid;place-items:center;
+    font-size:.85rem;font-weight:750;color:#fff;
+    background:linear-gradient(135deg,var(--violet),var(--bleu));
+  }
+  ol.steps strong{display:block;font-size:1rem;margin-bottom:2px}
+  ol.steps span{color:var(--dim);font-size:.93rem}
+
+  .warn{
+    border:1px solid rgba(251,191,36,.28);background:rgba(251,191,36,.06);
+    border-radius:16px;padding:20px 22px;margin-top:26px;
+  }
+  .warn strong{color:#fcd34d}
+  .warn p{color:var(--dim);font-size:.93rem;margin-top:5px}
+
+  footer{border-top:1px solid var(--line);padding:34px 0 46px;margin-top:30px;
+    color:#6d7590;font-size:.87rem;text-align:center}
+  footer a{color:var(--dim);text-decoration:none}
+  footer a:hover{color:var(--txt)}
+</style>
+</head>
+<body>
+<div class="glow"></div>
+
+<div class="wrap">
+  <header>
+    <nav>
+      <img src="icon.png" alt="ZipMulti">
+      <span class="sp"></span>
+      <a href="#fonctions">Fonctions</a>
+      <a href="#comment">Comment ça marche</a>
+      <a href="https://github.com/janintibo-art/ZipMulti">Code source</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <img class="logo" src="logo.png" alt="ZipMulti">
+    <h1>Découpez. Envoyez.<br><span class="g">Reconstruisez.</span></h1>
+    <p class="lead">
+      ZipMulti crée des ZIP à la taille exacte que vous choisissez. Les fichiers trop
+      volumineux sont découpés, puis réassemblés automatiquement à l'arrivée — avec
+      vérification d'intégrité de chaque morceau.
+    </p>
+
+    <div class="cta">
+      <a class="btn btn-p" href="https://github.com/janintibo-art/ZipMulti/releases/latest/download/ZipMulti.apk">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="m7 12 5 5 5-5"/><path d="M5 21h14"/></svg>
+        Télécharger l'APK Android
+      </a>
+      <a class="btn btn-s" href="https://github.com/janintibo-art/ZipMulti/releases/latest/download/ZipMulti-Setup.exe">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="1"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
+        Installeur Windows
+      </a>
+      <a class="btn btn-s" href="https://github.com/janintibo-art/ZipMulti/releases/latest">
+        Toutes les versions
+      </a>
+    </div>
+    <p class="note">Gratuit et open source · Android 7.0+ · Windows 10/11 64 bits</p>
+  </div>
+
+  <section id="fonctions">
+    <h2>Ce que fait ZipMulti</h2>
+    <p class="sub">Des ZIP ordinaires, transportables partout, avec un protocole de reconstruction en plus.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></div>
+        <h3>Taille au choix</h3>
+        <p>25 Mo, 100 Mo, 1 Go… vous fixez la limite, ZipMulti s'y tient volume par volume.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 6 4-4 4 4"/><path d="M12 2v10"/><path d="m8 18 4 4 4-4"/><path d="M12 22V12"/></svg></div>
+        <h3>Fractionnement intelligent</h3>
+        <p>Un fichier plus gros que la limite est découpé en parties réparties entre les volumes.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V6l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>Intégrité SHA-256</h3>
+        <p>Chaque partie et chaque fichier reconstruit sont vérifiés. Un volume corrompu est signalé.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+        <h3>Détection des volumes</h3>
+        <p>Sélectionnez un seul ZIP : ZipMulti retrouve les autres et prévient s'il en manque un.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
+        <h3>Android et Windows</h3>
+        <p>La même application des deux côtés, avec un tutoriel intégré en six étapes.</p>
+      </div>
+      <div class="card">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg></div>
+        <h3>Vrais fichiers .zip</h3>
+        <p>Sans fractionnement, chaque volume s'ouvre normalement avec n'importe quel décompresseur.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="comment">
+    <h2>Comment ça marche</h2>
+    <p class="sub">Trois minutes pour envoyer un fichier de plusieurs gigaoctets par n'importe quel canal.</p>
+    <ol class="steps">
+      <li><strong>Choisissez vos fichiers</strong><span>Ouvrez « Créer un lot », ajoutez les fichiers et le dossier de sortie.</span></li>
+      <li><strong>Fixez la taille maximale</strong><span>Un préréglage ou une valeur libre en mégaoctets. Laissez le fractionnement intelligent activé.</span></li>
+      <li><strong>Envoyez tous les volumes</strong><span>partage_001.zip, partage_002.zip… Ils doivent voyager ensemble.</span></li>
+      <li><strong>Le destinataire reconstruit</strong><span>Il ouvre ZipMulti, choisit un ZIP du lot et un dossier. Le fichier original est recomposé et vérifié.</span></li>
+    </ol>
+
+    <div class="warn">
+      <strong>Bon à savoir</strong>
+      <p>
+        Quand un gros fichier est réparti entre plusieurs volumes, un décompresseur classique
+        peut ouvrir chaque ZIP mais ne sait pas recoller les morceaux : la reconstruction se
+        fait dans ZipMulti. Le destinataire doit donc l'installer aussi.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <p>ZipMulti — <a href="https://github.com/janintibo-art/ZipMulti">code source sur GitHub</a></p>
+  </footer>
+</div>
+</body>
+</html>
