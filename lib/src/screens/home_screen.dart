@@ -23,6 +23,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   static const _tutorialSeenKey = 'tutorial_seen_v03';
+  static const _pendingDirKey = 'pending_output_dir';
 
   final _service = ZipMultiService();
   SharedPreferencesAsync get _preferences => SharedPreferencesAsync();
@@ -36,6 +37,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _smartSplit = true;
   bool _busy = false;
   bool _picking = false;
+  bool _cancelRequested = false;
+  PendingSet? _pending;
   double? _progress;
   int _section = 0;
   String _status = 'Prêt à créer ou reconstruire un lot ZipMulti.';
@@ -53,6 +56,7 @@ class _HomeScreenState extends State<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_showTutorialOnFirstLaunch());
     });
+    unawaited(_lookForPendingSet());
   }
 
 
@@ -71,6 +75,95 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {
       // Le tutoriel reste accessible manuellement si les préférences sont indisponibles.
     }
+  }
+
+  /// Un lot interrompu laisse son etat dans son dossier de sortie ; on retient
+  /// ce chemin dans les preferences pour le retrouver au lancement suivant.
+  Future<void> _lookForPendingSet() async {
+    try {
+      final path = await _preferences.getString(_pendingDirKey);
+      if (path == null || path.isEmpty) return;
+      final pending = await _service.findPending(Directory(path));
+      if (!mounted) return;
+      if (pending == null) {
+        await _preferences.remove(_pendingDirKey);
+        return;
+      }
+      setState(() => _pending = pending);
+    } catch (_) {
+      // Aucune reprise possible : l'application demarre normalement.
+    }
+  }
+
+  Future<void> _resumePending() async {
+    final pending = _pending;
+    if (pending == null) return;
+
+    setState(() {
+      _busy = true;
+      _cancelRequested = false;
+      _progress = 0;
+      _status = 'Reprise du lot « ${pending.baseName} »…';
+    });
+
+    try {
+      final result = await _service.resumePending(
+        pending,
+        onProgress: (message) {
+          if (mounted) setState(() => _status = message);
+        },
+        onFraction: (fraction) {
+          if (mounted) setState(() => _progress = fraction);
+        },
+        isCancelled: () => _cancelRequested,
+      );
+      await _preferences.remove(_pendingDirKey);
+      if (!mounted) return;
+      setState(() {
+        _pending = null;
+        _status = result.message;
+      });
+      _show(
+        '${result.message}\n\n'
+        'Dossier : ${StorageLocations.describe(pending.outputDirectory)}',
+        offerCopyInstructions: true,
+      );
+    } on ZipMultiCancelled {
+      if (mounted) {
+        setState(() => _status = 'Reprise interrompue. Le lot reste disponible.');
+      }
+    } on ZipMultiException catch (e) {
+      if (mounted) {
+        setState(() => _pending = null);
+        _show(e.message);
+      }
+      await _preferences.remove(_pendingDirKey);
+    } catch (e) {
+      if (mounted) _show('Erreur inattendue : $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _progress = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _discardPending() async {
+    final pending = _pending;
+    if (pending == null) return;
+    try {
+      await _service.discardPending(pending.outputDirectory);
+    } catch (_) {
+      // Le dossier a peut-etre deja ete nettoye a la main.
+    }
+    await _preferences.remove(_pendingDirKey);
+    if (!mounted) return;
+    setState(() {
+      _pending = null;
+      _status = 'Lot inachevé abandonné.';
+    });
   }
 
   Future<void> _openTutorial() async {
@@ -184,12 +277,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _busy = true;
+      _cancelRequested = false;
       _progress = 0;
       _status = 'Préparation du lot…';
     });
 
     try {
       final target = await StorageLocations.prepare(_nameController.text);
+      await _preferences.setString(_pendingDirKey, target.directory.path);
       final result = await _service.createVolumes(
         files: _files,
         outputDirectory: target.directory,
@@ -202,7 +297,9 @@ class _HomeScreenState extends State<HomeScreen> {
         onFraction: (fraction) {
           if (mounted) setState(() => _progress = fraction);
         },
+        isCancelled: () => _cancelRequested,
       );
+      await _preferences.remove(_pendingDirKey);
       if (!mounted) return;
       setState(() => _status = result.message);
       _show(
@@ -213,9 +310,15 @@ class _HomeScreenState extends State<HomeScreen> {
         'n’importe lequel dans ZipMulti v0.3 pour lancer la reconstruction.',
         offerCopyInstructions: true,
       );
+    } on ZipMultiCancelled {
+      await _lookForPendingSet();
+      if (mounted) {
+        setState(() => _status = 'Création interrompue. Vous pourrez reprendre.');
+      }
     } on ZipMultiException catch (e) {
       if (mounted) _show(e.message);
     } catch (e) {
+      await _lookForPendingSet();
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
       if (mounted) {
@@ -235,6 +338,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _busy = true;
+      _cancelRequested = false;
       _progress = 0;
       _status = 'Analyse du lot et recherche des volumes…';
     });
@@ -250,6 +354,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onFraction: (fraction) {
           if (mounted) setState(() => _progress = fraction);
         },
+        isCancelled: () => _cancelRequested,
       );
       if (!mounted) return;
       setState(() => _status = result.message);
@@ -259,6 +364,8 @@ class _HomeScreenState extends State<HomeScreen> {
         '${_locationNote(target)}\n'
         '${result.integrityVerified ? 'Intégrité vérifiée : OK.' : 'Extraction terminée.'}',
       );
+    } on ZipMultiCancelled {
+      if (mounted) setState(() => _status = 'Reconstruction interrompue.');
     } on ZipMultiException catch (e) {
       if (mounted) _show(e.message);
     } catch (e) {
@@ -396,6 +503,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
                 children: [
                   _topBar(),
+                  if (_pending != null) ...[
+                    const SizedBox(height: 14),
+                    _pendingBanner(_pending!),
+                  ],
                   const SizedBox(height: 18),
                   _hero(),
                   const SizedBox(height: 18),
@@ -792,6 +903,24 @@ class _HomeScreenState extends State<HomeScreen> {
                   _status,
                   style: const TextStyle(color: Colors.white70, height: 1.35),
                 ),
+                if (_busy) ...[
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _cancelRequested
+                          ? null
+                          : () => setState(() {
+                                _cancelRequested = true;
+                                _status = 'Interruption demandée…';
+                              }),
+                      icon: const Icon(Icons.stop_circle_outlined, size: 20),
+                      label: Text(
+                        _cancelRequested ? 'Interruption en cours…' : 'Annuler',
+                      ),
+                    ),
+                  ),
+                ],
                 if (_busy && _progress != null) ...[
                   const SizedBox(height: 12),
                   ClipRRect(
@@ -818,6 +947,57 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pendingBanner(PendingSet pending) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: const Color(0xFFFBBF24).withValues(alpha: .10),
+        border: Border.all(color: const Color(0xFFFBBF24).withValues(alpha: .35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.history_rounded, color: Color(0xFFFCD34D)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Lot inachevé : « ${pending.baseName} »',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${pending.volumesDone} volume(s) sur ${pending.volumeCount} sont déjà '
+            'écrits. Il en reste ${pending.remaining} à produire.',
+            style: const TextStyle(color: Colors.white70, height: 1.35),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              FilledButton.icon(
+                onPressed: _busy ? null : _resumePending,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('Reprendre'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _discardPending,
+                icon: const Icon(Icons.delete_outline_rounded),
+                label: const Text('Abandonner'),
+              ),
+            ],
           ),
         ],
       ),

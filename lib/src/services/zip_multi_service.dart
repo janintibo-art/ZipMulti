@@ -44,6 +44,13 @@ class ZipMultiService {
   static const String manifestName = 'ZIPMULTI_MANIFEST.json';
   static const String volumeInfoName = 'ZIPMULTI_VOLUME.json';
   static const String partsRoot = '__zipmulti_parts__';
+
+  /// Etat de reprise depose dans le dossier de sortie pendant la creation.
+  static const String resumeName = 'ZIPMULTI_REPRISE.json';
+
+  /// Sous-dossier de travail conservant les parties decoupees entre deux
+  /// tentatives. Il est efface des que le lot est termine ou abandonne.
+  static const String workDirName = '.zipmulti_travail';
   static const int formatVersion = 2;
 
   /// Part de la progression consacree a l'analyse et au decoupage ; le reste
@@ -56,6 +63,50 @@ class ZipMultiService {
   /// Marge réservée dans chaque volume pour les en-têtes ZIP et le descripteur
   /// de volume, en plus du manifeste lui-même.
   static const int _volumeOverhead = 8 * 1024;
+
+  /// Reprend un lot laisse en plan, si son etat est encore exploitable.
+  Future<PendingSet?> findPending(Directory outputDirectory) async {
+    final stateFile = File(p.join(outputDirectory.path, resumeName));
+    if (!await stateFile.exists()) return null;
+    try {
+      final decoded = jsonDecode(await stateFile.readAsString());
+      if (decoded is! Map<String, dynamic>) return null;
+      final pending = PendingSet._(outputDirectory, decoded);
+      if (pending.remaining <= 0) return null;
+      return pending;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Efface l'etat et le dossier de travail, ainsi que les volumes deja ecrits.
+  Future<void> discardPending(Directory outputDirectory) async {
+    final work = Directory(p.join(outputDirectory.path, workDirName));
+    if (await work.exists()) await work.delete(recursive: true);
+
+    final stateFile = File(p.join(outputDirectory.path, resumeName));
+    if (await stateFile.exists()) {
+      try {
+        final decoded = jsonDecode(await stateFile.readAsString());
+        if (decoded is Map<String, dynamic>) {
+          final base = decoded['baseName']?.toString();
+          if (base != null) {
+            for (var i = 1; i <= 999; i++) {
+              final volume = File(p.join(
+                outputDirectory.path,
+                '${base}_${i.toString().padLeft(3, '0')}.zip',
+              ));
+              if (!await volume.exists()) break;
+              await volume.delete();
+            }
+          }
+        }
+      } catch (_) {
+        // L'etat est illisible : on se contente de le supprimer.
+      }
+      await stateFile.delete();
+    }
+  }
 
   Future<void> _ensureNoPreviousSet(Directory directory, String baseName) async {
     final pattern = RegExp('^${RegExp.escape(baseName)}_[0-9]{3,}\\.zip\$',
@@ -89,6 +140,7 @@ class ZipMultiService {
     required bool advancedSplit,
     void Function(String message)? onProgress,
     void Function(double fraction)? onFraction,
+    bool Function()? isCancelled,
   }) async {
     if (files.isEmpty) {
       throw ZipMultiException('Aucun fichier sélectionné.');
@@ -100,10 +152,20 @@ class ZipMultiService {
     await outputDirectory.create(recursive: true);
     final safeBaseName = _sanitizeBaseName(baseName);
     await _ensureNoPreviousSet(outputDirectory, safeBaseName);
-    final tempDirectory = await Directory.systemTemp.createTemp('zipmulti_create_');
-    final createdVolumes = <File>[];
+    // Le travail vit desormais a cote des volumes et non dans le dossier
+    // temporaire : c'est ce qui permet de reprendre apres une interruption
+    // sans refaire tout le decoupage.
+    final tempDirectory = Directory(p.join(outputDirectory.path, workDirName));
+    if (await tempDirectory.exists()) await tempDirectory.delete(recursive: true);
+    await tempDirectory.create(recursive: true);
+
+    var volumesStarted = false;
 
     try {
+      void checkCancelled() {
+        if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
+      }
+      checkCancelled();
       // Une marge volontaire laisse de la place aux en-têtes ZIP et au manifeste
       // présent dans chacun des volumes.
       final payloadTarget = max(256 * 1024, (maxBytes * 0.82).floor());
@@ -136,6 +198,7 @@ class ZipMultiService {
         final source = files[fileIndex];
         if (!await source.exists()) continue;
 
+        checkCancelled();
         final stat = await source.stat();
         if (stat.type != FileSystemEntityType.file) continue;
 
@@ -235,6 +298,7 @@ class ZipMultiService {
               await closeAndRegisterChunk();
               await openChunk();
               sinceLastFlush = 0;
+              checkCancelled();
             } else if (sinceLastFlush >= _flushInterval) {
               // Sans ce flush, IOSink accumule les octets en mémoire beaucoup
               // plus vite que le disque ne les écrit : sur un téléphone, un
@@ -295,82 +359,208 @@ class ZipMultiService {
         flush: true,
       );
 
-      final plannedBytes =
-          max(1, planned.fold<int>(0, (sum, entry) => sum + entry.size));
-      var writtenBytes = 0;
-
-      for (var i = 0; i < groups.length; i++) {
-        final number = i + 1;
-        final volumePath = p.join(
-          outputDirectory.path,
-          '${safeBaseName}_${number.toString().padLeft(3, '0')}.zip',
-        );
-        onProgress?.call('Création du volume $number/${groups.length}…');
-
-        final volumeInfo = <String, Object?>{
-          'format': 'ZipMultiVolume',
-          'version': formatVersion,
-          'setId': setId,
-          'baseName': safeBaseName,
-          'index': number,
-          'count': groups.length,
-        };
-        final volumeInfoFile = File(p.join(tempDirectory.path, 'volume_$number.json'));
-        await volumeInfoFile.writeAsString(jsonEncode(volumeInfo), flush: true);
-
-        final volume = File(volumePath);
-        createdVolumes.add(volume);
-
-        final encoder = ZipFileEncoder();
-        encoder.create(volumePath, level: DeflateLevel.bestSpeed);
-        await encoder.addFile(manifestFile, manifestName, DeflateLevel.bestSpeed);
-        await encoder.addFile(volumeInfoFile, volumeInfoName, DeflateLevel.bestSpeed);
-        for (final entry in groups[i]) {
-          await encoder.addFile(
-            entry.source,
-            entry.archiveName,
-            DeflateLevel.bestSpeed,
-          );
-          writtenBytes += entry.size;
-          final done = (writtenBytes / plannedBytes).clamp(0.0, 1.0);
-          onFraction?.call(_analysisWeight + (1 - _analysisWeight) * done);
-        }
-        await encoder.close();
-
-        final actualSize = await volume.length();
-        if (actualSize > maxBytes) {
-          if (await volume.exists()) {
-            await volume.delete();
-          }
-          throw ZipMultiException(
-            'Le volume $number dépasse la limite choisie après création '
-            '(${_formatBytes(actualSize)} > ${_formatBytes(maxBytes)}). '
-            'Essayez une limite légèrement supérieure.',
-          );
-        }
-      }
-
-      onFraction?.call(1);
-      return ZipMultiResult(
-        volumes: List.unmodifiable(createdVolumes),
-        filesProcessed: manifestFiles.length,
-        integrityVerified: true,
-        message: advancedSplit
-            ? '${createdVolumes.length} volume(s) créé(s). Le lot contient ${manifestFiles.length} fichier(s), avec manifeste de reconstruction et empreintes SHA-256.'
-            : '${createdVolumes.length} ZIP standard(s) créé(s). Les fichiers ne sont pas coupés et chaque volume reste ouvrable séparément.',
+      // L'etat de reprise n'est ecrit qu'une fois le plan complet etabli :
+      // en dessous, il n'y aurait rien d'utile a reprendre.
+      final plan = _BuildPlan(
+        setId: setId,
+        baseName: safeBaseName,
+        maxBytes: maxBytes,
+        advancedSplit: advancedSplit,
+        fileCount: manifestFiles.length,
+        groups: groups,
+        manifestPath: manifestFile.path,
+        volumeCount: groups.length,
       );
+      await _saveResumeState(outputDirectory, plan, 0);
+
+      volumesStarted = true;
+      final result = await _writeVolumes(
+        outputDirectory: outputDirectory,
+        workDirectory: tempDirectory,
+        plan: plan,
+        startIndex: 0,
+        onProgress: onProgress,
+        onFraction: onFraction,
+        isCancelled: isCancelled,
+      );
+
+      await _cleanUpAfterSuccess(outputDirectory, tempDirectory);
+      return result;
     } catch (_) {
-      for (final volume in createdVolumes) {
-        if (await volume.exists()) {
-          await volume.delete();
+      if (!volumesStarted) {
+        // Rien d'exploitable : on ne laisse pas de dossier de travail derriere.
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
         }
+        final stateFile = File(p.join(outputDirectory.path, resumeName));
+        if (await stateFile.exists()) await stateFile.delete();
       }
+      // Sinon tout est conserve volontairement : l'utilisateur pourra reprendre.
       rethrow;
-    } finally {
-      if (await tempDirectory.exists()) {
-        await tempDirectory.delete(recursive: true);
+    }
+  }
+
+  /// Reprend l'ecriture des volumes la ou elle s'etait arretee.
+  Future<ZipMultiResult> resumePending(
+    PendingSet pending, {
+    void Function(String message)? onProgress,
+    void Function(double fraction)? onFraction,
+    bool Function()? isCancelled,
+  }) async {
+    final outputDirectory = pending.outputDirectory;
+    final workDirectory = Directory(p.join(outputDirectory.path, workDirName));
+    final plan = pending._plan;
+
+    for (final group in plan.groups) {
+      for (final entry in group) {
+        if (!await entry.source.exists()) {
+          throw ZipMultiException(
+            'Impossible de reprendre : « ${p.basename(entry.source.path)} » '
+            'n’est plus accessible. Relancez la création depuis le début.',
+          );
+        }
       }
     }
+    if (!await File(plan.manifestPath).exists()) {
+      throw ZipMultiException(
+        'Impossible de reprendre : le manifeste du lot a disparu. '
+        'Relancez la création depuis le début.',
+      );
+    }
+
+    final result = await _writeVolumes(
+      outputDirectory: outputDirectory,
+      workDirectory: workDirectory,
+      plan: plan,
+      startIndex: pending.volumesDone,
+      onProgress: onProgress,
+      onFraction: onFraction,
+      isCancelled: isCancelled,
+    );
+
+    await _cleanUpAfterSuccess(outputDirectory, workDirectory);
+    return result;
+  }
+
+  Future<ZipMultiResult> _writeVolumes({
+    required Directory outputDirectory,
+    required Directory workDirectory,
+    required _BuildPlan plan,
+    required int startIndex,
+    void Function(String message)? onProgress,
+    void Function(double fraction)? onFraction,
+    bool Function()? isCancelled,
+  }) async {
+    final groups = plan.groups;
+    final manifestFile = File(plan.manifestPath);
+    final createdVolumes = <File>[];
+
+    var plannedBytes = 0;
+    var writtenBytes = 0;
+    for (var i = 0; i < groups.length; i++) {
+      for (final entry in groups[i]) {
+        plannedBytes += entry.size;
+        if (i < startIndex) writtenBytes += entry.size;
+      }
+    }
+    if (plannedBytes <= 0) plannedBytes = 1;
+
+    // Les volumes deja ecrits lors d'une tentative precedente sont conserves.
+    for (var i = 0; i < startIndex; i++) {
+      createdVolumes.add(File(_volumePath(outputDirectory, plan.baseName, i + 1)));
+    }
+
+    for (var i = startIndex; i < groups.length; i++) {
+      if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
+
+      final number = i + 1;
+      final volumePath = _volumePath(outputDirectory, plan.baseName, number);
+      onProgress?.call('Création du volume $number/${groups.length}…');
+
+      final volumeInfo = <String, Object?>{
+        'format': 'ZipMultiVolume',
+        'version': formatVersion,
+        'setId': plan.setId,
+        'baseName': plan.baseName,
+        'index': number,
+        'count': groups.length,
+      };
+      final volumeInfoFile = File(p.join(workDirectory.path, 'volume_$number.json'));
+      await volumeInfoFile.writeAsString(jsonEncode(volumeInfo), flush: true);
+
+      final volume = File(volumePath);
+      if (await volume.exists()) await volume.delete();
+      createdVolumes.add(volume);
+
+      final encoder = ZipFileEncoder();
+      encoder.create(volumePath, level: DeflateLevel.bestSpeed);
+      await encoder.addFile(manifestFile, manifestName, DeflateLevel.bestSpeed);
+      await encoder.addFile(volumeInfoFile, volumeInfoName, DeflateLevel.bestSpeed);
+      for (final entry in groups[i]) {
+        await encoder.addFile(
+          entry.source,
+          entry.archiveName,
+          DeflateLevel.bestSpeed,
+        );
+        writtenBytes += entry.size;
+        final done = (writtenBytes / plannedBytes).clamp(0.0, 1.0);
+        onFraction?.call(_analysisWeight + (1 - _analysisWeight) * done);
+      }
+      await encoder.close();
+
+      final actualSize = await volume.length();
+      if (actualSize > plan.maxBytes) {
+        if (await volume.exists()) await volume.delete();
+        throw ZipMultiException(
+          'Le volume $number dépasse la limite choisie après création '
+          '(${_formatBytes(actualSize)} > ${_formatBytes(plan.maxBytes)}). '
+          'Essayez une limite légèrement supérieure.',
+        );
+      }
+
+      // Point de reprise : ce volume est complet et verifie.
+      await _saveResumeState(outputDirectory, plan, number);
+    }
+
+    onFraction?.call(1);
+    return ZipMultiResult(
+      volumes: List.unmodifiable(createdVolumes),
+      filesProcessed: plan.fileCount,
+      integrityVerified: true,
+      message: plan.advancedSplit
+          ? '${createdVolumes.length} volume(s) créé(s). Le lot contient ${plan.fileCount} fichier(s), avec manifeste de reconstruction et empreintes SHA-256.'
+          : '${createdVolumes.length} ZIP standard(s) créé(s). Les fichiers ne sont pas coupés et chaque volume reste ouvrable séparément.',
+    );
+  }
+
+  String _volumePath(Directory directory, String baseName, int number) {
+    return p.join(
+      directory.path,
+      '${baseName}_${number.toString().padLeft(3, '0')}.zip',
+    );
+  }
+
+  Future<void> _saveResumeState(
+    Directory outputDirectory,
+    _BuildPlan plan,
+    int volumesDone,
+  ) async {
+    final stateFile = File(p.join(outputDirectory.path, resumeName));
+    await stateFile.writeAsString(
+      jsonEncode(plan.toJson(volumesDone)),
+      flush: true,
+    );
+  }
+
+  Future<void> _cleanUpAfterSuccess(
+    Directory outputDirectory,
+    Directory workDirectory,
+  ) async {
+    if (await workDirectory.exists()) {
+      await workDirectory.delete(recursive: true);
+    }
+    final stateFile = File(p.join(outputDirectory.path, resumeName));
+    if (await stateFile.exists()) await stateFile.delete();
   }
 
   Future<ZipMultiResult> extractVolumes({
@@ -378,6 +568,7 @@ class ZipMultiService {
     required Directory destination,
     void Function(String message)? onProgress,
     void Function(double fraction)? onFraction,
+    bool Function()? isCancelled,
   }) async {
     if (selectedVolumes.isEmpty) {
       throw ZipMultiException('Aucun ZIP sélectionné.');
@@ -443,6 +634,7 @@ class ZipMultiService {
         final root = Directory(p.join(temp.path, 'v${(i + 1).toString().padLeft(4, '0')}'));
         await root.create(recursive: true);
         onProgress?.call('Lecture du volume ${i + 1}/${volumes.length} : ${p.basename(volume.path)}');
+        if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
         await extractFileToDisk(volume.path, root.path);
         try {
           readBytes += await volume.length();
@@ -584,6 +776,7 @@ class ZipMultiService {
         final output = File(p.join(destination.path, safeName));
         await output.parent.create(recursive: true);
 
+        if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
         onProgress?.call(
           'Reconstruction ${fileIndex + 1}/${files.length} : $safeName',
         );
@@ -823,4 +1016,112 @@ class ZipMultiService {
     }
     return '${value.toStringAsFixed(value >= 10 || unit == 0 ? 0 : 1)} ${units[unit]}';
   }
+}
+
+/// Levée quand l'utilisateur interrompt volontairement un traitement.
+class ZipMultiCancelled implements Exception {
+  const ZipMultiCancelled();
+
+  @override
+  String toString() => 'Traitement annulé.';
+}
+
+/// Plan de fabrication d'un lot, suffisant pour reprendre l'écriture des
+/// volumes sans refaire l'analyse ni le découpage.
+class _BuildPlan {
+  const _BuildPlan({
+    required this.setId,
+    required this.baseName,
+    required this.maxBytes,
+    required this.advancedSplit,
+    required this.fileCount,
+    required this.groups,
+    required this.manifestPath,
+    required this.volumeCount,
+  });
+
+  final String setId;
+  final String baseName;
+  final int maxBytes;
+  final bool advancedSplit;
+  final int fileCount;
+  final List<List<_PlannedEntry>> groups;
+  final String manifestPath;
+  final int volumeCount;
+
+  Map<String, Object?> toJson(int volumesDone) => <String, Object?>{
+        'format': 'ZipMultiReprise',
+        'setId': setId,
+        'baseName': baseName,
+        'maxBytes': maxBytes,
+        'advancedSplit': advancedSplit,
+        'fileCount': fileCount,
+        'manifestPath': manifestPath,
+        'volumeCount': volumeCount,
+        'volumesDone': volumesDone,
+        'groups': groups
+            .map((group) => group
+                .map((entry) => <String, Object?>{
+                      'source': entry.source.path,
+                      'archiveName': entry.archiveName,
+                      'size': entry.size,
+                    })
+                .toList())
+            .toList(),
+      };
+
+  static _BuildPlan fromJson(Map<String, dynamic> json) {
+    final rawGroups = json['groups'];
+    final groups = <List<_PlannedEntry>>[];
+    if (rawGroups is List) {
+      for (final rawGroup in rawGroups) {
+        final group = <_PlannedEntry>[];
+        if (rawGroup is List) {
+          for (final rawEntry in rawGroup) {
+            if (rawEntry is! Map) continue;
+            final source = rawEntry['source']?.toString();
+            final archiveName = rawEntry['archiveName']?.toString();
+            final size = rawEntry['size'];
+            if (source == null || archiveName == null || size is! int) continue;
+            group.add(_PlannedEntry(
+              source: File(source),
+              archiveName: archiveName,
+              size: size,
+            ));
+          }
+        }
+        groups.add(group);
+      }
+    }
+
+    return _BuildPlan(
+      setId: json['setId']?.toString() ?? '',
+      baseName: json['baseName']?.toString() ?? 'partage',
+      maxBytes: json['maxBytes'] is int ? json['maxBytes'] as int : 100 * 1024 * 1024,
+      advancedSplit: json['advancedSplit'] == true,
+      fileCount: json['fileCount'] is int ? json['fileCount'] as int : 0,
+      groups: groups,
+      manifestPath: json['manifestPath']?.toString() ?? '',
+      volumeCount: json['volumeCount'] is int ? json['volumeCount'] as int : groups.length,
+    );
+  }
+}
+
+/// Lot commencé puis interrompu, retrouvé au lancement suivant.
+class PendingSet {
+  PendingSet._(this.outputDirectory, Map<String, dynamic> json)
+      : _plan = _BuildPlan.fromJson(json),
+        volumesDone = json['volumesDone'] is int ? json['volumesDone'] as int : 0;
+
+  final Directory outputDirectory;
+  final _BuildPlan _plan;
+
+  /// Nombre de volumes déjà écrits et vérifiés.
+  final int volumesDone;
+
+  String get baseName => _plan.baseName;
+
+  int get volumeCount => _plan.volumeCount;
+
+  int get remaining => volumeCount - volumesDone;
 }
