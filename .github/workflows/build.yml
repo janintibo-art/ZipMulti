@@ -30,6 +30,16 @@ jobs:
           # fait echouer flutter analyze / flutter test sur ce projet.
           rm -f test/widget_test.dart
 
+      - name: Preparer la cle de signature
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > android/zipmulti.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=zipmulti.jks\n' \
+            "${{ secrets.KEYSTORE_PASSWORD }}" "${{ secrets.KEY_PASSWORD }}" "${{ secrets.KEY_ALIAS }}" \
+            > android/key.properties
+
       - name: Enable Android ZIP open/share intents
         run: python3 tool/patch_android_manifest.py
 

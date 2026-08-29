@@ -71,3 +71,39 @@ elif groovy.exists():
                     '    compileSdkVersion 37', gradle)
     groovy.write_text(gradle, encoding='utf-8')
     print('compileSdk force a 37.')
+
+# Signature de l'APK de release quand android/key.properties est present.
+if kts.exists():
+    g = kts.read_text(encoding='utf-8')
+    if 'keystoreProperties' not in g:
+        entete = (
+            'import java.util.Properties\n'
+            'import java.io.FileInputStream\n\n'
+            'val keystorePropertiesFile = rootProject.file("key.properties")\n'
+            'val keystoreProperties = Properties()\n'
+            'if (keystorePropertiesFile.exists()) {\n'
+            '    keystoreProperties.load(FileInputStream(keystorePropertiesFile))\n'
+            '}\n\n'
+        )
+        g = entete + g
+        bloc = (
+            '    signingConfigs {\n'
+            '        if (keystorePropertiesFile.exists()) {\n'
+            '            create("release") {\n'
+            '                keyAlias = keystoreProperties["keyAlias"] as String\n'
+            '                keyPassword = keystoreProperties["keyPassword"] as String\n'
+            '                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)\n'
+            '                storePassword = keystoreProperties["storePassword"] as String\n'
+            '            }\n'
+            '        }\n'
+            '    }\n\n'
+            '    buildTypes {\n'
+        )
+        g = g.replace('    buildTypes {\n', bloc, 1)
+        g = g.replace(
+            'signingConfig = signingConfigs.getByName("debug")',
+            'signingConfig = if (keystorePropertiesFile.exists()) '
+            'signingConfigs.getByName("release") else signingConfigs.getByName("debug")',
+            1)
+        kts.write_text(g, encoding='utf-8')
+        print('Signature de release configuree.')

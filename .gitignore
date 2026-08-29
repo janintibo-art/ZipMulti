@@ -15,3 +15,6 @@ web/
 .vscode/
 *.iml
 installer/output/
+*.jks
+*.keystore
+key.properties
