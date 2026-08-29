@@ -37,7 +37,7 @@ jobs:
         run: flutter pub get
 
       - name: Application icon
-        run: dart run flutter_launcher_icons
+        run: dart run flutter_launcher_icons -f icons_android.yaml
 
       - name: Analyze
         run: flutter analyze --no-fatal-infos
@@ -83,7 +83,7 @@ jobs:
         run: flutter pub get
 
       - name: Application icon
-        run: dart run flutter_launcher_icons
+        run: dart run flutter_launcher_icons -f icons_windows.yaml
 
       - name: Analyze
         run: flutter analyze --no-fatal-infos
