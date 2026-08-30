@@ -118,8 +118,12 @@ class StorageLocations {
       final name = suffix == 0 ? base : '$base-${suffix + 1}';
       final candidate = Directory(p.join(root.path, name));
 
-      if (await candidate.exists() && await _containsZip(candidate)) {
-        continue; // Un lot occupe déjà ce nom, on essaie le suivant.
+      // On ne réutilise jamais un dossier existant, même vide. Après une
+      // suppression faite depuis un gestionnaire de fichiers, MediaStore garde
+      // des entrées orphelines et Android refuse de recréer un fichier au même
+      // chemin : partir d'un dossier neuf évite complètement ce piège.
+      if (await candidate.exists()) {
+        continue;
       }
       if (await _canWrite(candidate, probeExtensions)) {
         return (candidate, suffix > 0);
@@ -137,19 +141,6 @@ class StorageLocations {
       return null;
     }
     return null;
-  }
-
-  static Future<bool> _containsZip(Directory directory) async {
-    try {
-      await for (final entity in directory.list(followLinks: false)) {
-        if (entity is File && entity.path.toLowerCase().endsWith('.zip')) {
-          return true;
-        }
-      }
-    } catch (_) {
-      return false;
-    }
-    return false;
   }
 
   /// Crée le dossier puis y écrit réellement un fichier témoin : c'est le seul

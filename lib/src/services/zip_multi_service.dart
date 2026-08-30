@@ -537,11 +537,10 @@ class ZipMultiService {
       await volumeInfoFile.writeAsString(jsonEncode(volumeInfo), flush: true);
 
       final volume = File(volumePath);
-      if (await volume.exists()) await volume.delete();
       createdVolumes.add(volume);
 
       final encoder = ZipFileEncoder();
-      encoder.create(volumePath, level: DeflateLevel.bestSpeed);
+      await _createArchive(encoder, volume);
       await encoder.addFile(manifestFile, manifestName, DeflateLevel.bestSpeed);
       await encoder.addFile(volumeInfoFile, volumeInfoName, DeflateLevel.bestSpeed);
       final readmeFile = File(plan.readmePath);
@@ -620,6 +619,28 @@ class ZipMultiService {
     }
 
     return buffer.toString();
+  }
+
+  /// Ouvre l'archive en écriture, en absorbant le « File exists » que le
+  /// stockage Android renvoie parfois juste après une suppression : le cache du
+  /// système de fichiers met un instant à se mettre à jour.
+  Future<void> _createArchive(ZipFileEncoder encoder, File volume) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (await volume.exists()) {
+        try {
+          await volume.delete();
+        } catch (_) {
+          // On tentera quand même l'ouverture ci-dessous.
+        }
+      }
+      try {
+        encoder.create(volume.path, level: DeflateLevel.bestSpeed);
+        return;
+      } on FileSystemException {
+        if (attempt == 2) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    }
   }
 
   String _volumePath(Directory directory, String baseName, int number) {
