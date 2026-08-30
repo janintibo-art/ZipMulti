@@ -48,13 +48,22 @@ class StorageLocations {
   ///
   /// Si un lot du même nom s'y trouve déjà, un suffixe numérique est ajouté
   /// plutôt que d'écraser ou de faire échouer l'opération.
-  static Future<ResolvedDirectory> prepare(String folderName) async {
+  ///
+  /// [probeExtensions] liste les types de fichiers qui devront réellement y
+  /// être écrits. C'est indispensable : depuis Android 11, une application peut
+  /// créer un .zip dans Téléchargements mais se voir refuser un .jpg au même
+  /// endroit, car les médias passent obligatoirement par MediaStore. Tester
+  /// avec un nom neutre donnerait donc un faux feu vert.
+  static Future<ResolvedDirectory> prepare(
+    String folderName, {
+    List<String> probeExtensions = const ['.zip'],
+  }) async {
     final safe = sanitizeFolderName(folderName);
     final roots = await _candidateRoots();
 
     for (var index = 0; index < roots.length; index++) {
       final root = roots[index];
-      final picked = await _firstFreeName(root, safe);
+      final picked = await _firstFreeName(root, safe, probeExtensions);
       if (picked == null) continue;
       return ResolvedDirectory(
         directory: picked.$1,
@@ -103,6 +112,7 @@ class StorageLocations {
   static Future<(Directory, bool)?> _firstFreeName(
     Directory root,
     String base,
+    List<String> probeExtensions,
   ) async {
     for (var suffix = 0; suffix < 200; suffix++) {
       final name = suffix == 0 ? base : '$base-${suffix + 1}';
@@ -111,10 +121,20 @@ class StorageLocations {
       if (await candidate.exists() && await _containsZip(candidate)) {
         continue; // Un lot occupe déjà ce nom, on essaie le suivant.
       }
-      if (await _canWrite(candidate)) {
+      if (await _canWrite(candidate, probeExtensions)) {
         return (candidate, suffix > 0);
       }
-      return null; // La racine elle-même est refusée : inutile d'insister.
+      // La racine est refusée pour ces types de fichiers. On retire le dossier
+      // vide qu'on vient de créer pour ne pas laisser de trace inutile.
+      try {
+        if (await candidate.exists() &&
+            await candidate.list().isEmpty) {
+          await candidate.delete();
+        }
+      } catch (_) {
+        // Sans importance : le dossier restera vide.
+      }
+      return null;
     }
     return null;
   }
@@ -134,12 +154,17 @@ class StorageLocations {
 
   /// Crée le dossier puis y écrit réellement un fichier témoin : c'est le seul
   /// moyen fiable de savoir si Android acceptera l'écriture.
-  static Future<bool> _canWrite(Directory directory) async {
+  static Future<bool> _canWrite(
+    Directory directory,
+    List<String> probeExtensions,
+  ) async {
     try {
       await directory.create(recursive: true);
-      final probe = File(p.join(directory.path, '.zipmulti_write_test'));
-      await probe.writeAsString('ok', flush: true);
-      await probe.delete();
+      for (final extension in probeExtensions) {
+        final probe = File(p.join(directory.path, '.zipmulti_test$extension'));
+        await probe.writeAsString('ok', flush: true);
+        await probe.delete();
+      }
       return true;
     } catch (_) {
       return false;

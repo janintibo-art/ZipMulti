@@ -407,7 +407,12 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final target = await StorageLocations.prepare(_extractNameController.text);
+      // Les fichiers reconstruits peuvent être de n'importe quel type ; on
+      // vérifie donc que les médias passent avant de choisir l'emplacement.
+      final target = await StorageLocations.prepare(
+        _extractNameController.text,
+        probeExtensions: const ['.jpg', '.mp4', '.mp3', '.zip'],
+      );
       final result = await _service.extractVolumes(
         selectedVolumes: _zipVolumes,
         destination: target.directory,
