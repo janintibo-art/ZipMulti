@@ -9,7 +9,6 @@ import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../services/media_index.dart';
 import '../services/storage_locations.dart';
 import '../services/zip_multi_service.dart';
 import 'tutorial_screen.dart';
@@ -174,7 +173,6 @@ class _HomeScreenState extends State<HomeScreen> {
         isCancelled: () => _cancelRequested,
       );
       await _preferences.remove(_pendingDirKey);
-      await MediaIndex.announceDirectory(pending.outputDirectory);
       if (!mounted) return;
       setState(() {
         _pending = null;
@@ -363,7 +361,6 @@ class _HomeScreenState extends State<HomeScreen> {
         isCancelled: () => _cancelRequested,
       );
       await _preferences.remove(_pendingDirKey);
-      await MediaIndex.announceDirectory(target.directory);
       if (!mounted) return;
       setState(() {
         _status = result.message;
@@ -429,7 +426,6 @@ class _HomeScreenState extends State<HomeScreen> {
         },
         isCancelled: () => _cancelRequested,
       );
-      await MediaIndex.announceDirectory(target.directory);
       if (!mounted) return;
       setState(() => _status = result.message);
       _show(
