@@ -107,3 +107,66 @@ if kts.exists():
             1)
         kts.write_text(g, encoding='utf-8')
         print('Signature de release configuree.')
+
+
+# ---------------------------------------------------------------------------
+# Declaration des fichiers a MediaStore.
+#
+# ZipMulti ecrit ses volumes directement sur le disque. L'index multimedia
+# d'Android ne les connait donc pas, et le raccourci « Telechargements »
+# affiche un dossier vide tant qu'un gestionnaire de fichiers n'a pas parcouru
+# le vrai dossier. On expose MediaScannerConnection a Dart pour les declarer
+# nous-memes des qu'ils sont ecrits.
+# ---------------------------------------------------------------------------
+activities = list(Path('android/app/src/main/kotlin').rglob('MainActivity.kt'))
+if not activities:
+    raise SystemExit('MainActivity.kt introuvable.')
+
+for activity in activities:
+    source = activity.read_text(encoding='utf-8')
+    if 'zipmulti/media' in source:
+        continue
+
+    package_line = ''
+    for line in source.splitlines():
+        if line.startswith('package '):
+            package_line = line
+            break
+    if not package_line:
+        raise SystemExit(f'Ligne package absente de {activity}.')
+
+    activity.write_text(package_line + '''
+
+import android.media.MediaScannerConnection
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterActivity() {
+    private val mediaChannel = "zipmulti/media"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mediaChannel)
+            .setMethodCallHandler { call, result ->
+                if (call.method == "scan") {
+                    val paths = call.argument<List<String>>("paths")
+                    if (paths.isNullOrEmpty()) {
+                        result.success(false)
+                    } else {
+                        MediaScannerConnection.scanFile(
+                            applicationContext,
+                            paths.toTypedArray(),
+                            null,
+                            null
+                        )
+                        result.success(true)
+                    }
+                } else {
+                    result.notImplemented()
+                }
+            }
+    }
+}
+''', encoding='utf-8')
+    print(f'MainActivity enrichi : {activity}')
