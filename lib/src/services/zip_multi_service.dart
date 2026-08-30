@@ -615,27 +615,30 @@ class ZipMultiService {
         try {
           totalVolumeBytes += await volume.length();
         } catch (_) {
-          // Volume illisible : signale plus bas par l'extraction elle-meme.
+          // Volume illisible : signale plus bas par la lecture elle-meme.
         }
       }
       if (totalVolumeBytes <= 0) totalVolumeBytes = 1;
       var readBytes = 0;
       onFraction?.call(0);
 
-      final extractedRoots = <Directory>[];
       final acceptedVolumes = <File>[];
       Map<String, dynamic>? manifest;
       String? expectedSetId;
       int? expectedVolumeCount;
       final seenVolumeIndexes = <int>{};
 
+      // Premiere passe : on ne lit que les deux fichiers de metadonnees de
+      // chaque volume, sans rien decompresser d'autre. C'est instantane meme
+      // sur un lot de plusieurs gigaoctets.
       for (var i = 0; i < volumes.length; i++) {
         final volume = volumes[i];
-        final root = Directory(p.join(temp.path, 'v${(i + 1).toString().padLeft(4, '0')}'));
-        await root.create(recursive: true);
-        onProgress?.call('Lecture du volume ${i + 1}/${volumes.length} : ${p.basename(volume.path)}');
+        onProgress?.call(
+          'Lecture du volume ${i + 1}/${volumes.length} : ${p.basename(volume.path)}',
+        );
         if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
-        await extractFileToDisk(volume.path, root.path);
+
+        final metadata = await _readVolumeMetadata(volume);
         try {
           readBytes += await volume.length();
         } catch (_) {
@@ -645,41 +648,16 @@ class ZipMultiService {
           _analysisWeight * (readBytes / totalVolumeBytes).clamp(0.0, 1.0),
         );
 
-        final manifestFile = File(p.join(root.path, manifestName));
-        final volumeInfoFile = File(p.join(root.path, volumeInfoName));
-
-        Map<String, dynamic>? volumeManifest;
-        String? thisSetId;
-        int? thisIndex;
-        int? thisCount;
-
-        if (await manifestFile.exists()) {
-          final decoded = jsonDecode(await manifestFile.readAsString());
-          if (decoded is! Map<String, dynamic>) {
-            throw ZipMultiException('Manifeste ZipMulti invalide dans ${p.basename(volume.path)}.');
-          }
-          volumeManifest = decoded;
-          thisSetId = decoded['setId']?.toString();
-          thisCount = _asInt(decoded['volumeCount']);
-        }
-
-        if (await volumeInfoFile.exists()) {
-          final decoded = jsonDecode(await volumeInfoFile.readAsString());
-          if (decoded is Map<String, dynamic>) {
-            thisSetId ??= decoded['setId']?.toString();
-            thisIndex = _asInt(decoded['index']);
-            thisCount ??= _asInt(decoded['count']);
-          }
-        }
+        final volumeManifest = metadata.manifest;
+        final thisSetId = metadata.setId;
+        final thisIndex = metadata.index;
+        final thisCount = metadata.count;
 
         if (expectedSetId != null && thisSetId != null && expectedSetId != thisSetId) {
           // Deux lots peuvent partager le même nom de base dans un même dossier.
           // Quand les voisins ont été trouvés tout seuls, on ignore simplement
           // l'intrus ; quand l'utilisateur les a choisis lui-même, on le prévient.
-          if (autoDiscovered) {
-            await root.delete(recursive: true);
-            continue;
-          }
+          if (autoDiscovered) continue;
           throw ZipMultiException(
             'Les ZIP sélectionnés appartiennent à plusieurs lots différents. '
             'Placez uniquement les volumes d’un même partage ensemble.',
@@ -690,7 +668,6 @@ class ZipMultiService {
         manifest ??= volumeManifest;
         expectedVolumeCount ??= thisCount;
         if (thisIndex != null) seenVolumeIndexes.add(thisIndex);
-        extractedRoots.add(root);
         acceptedVolumes.add(volume);
       }
 
@@ -701,8 +678,9 @@ class ZipMultiService {
 
       if (manifest == null) {
         onProgress?.call('ZIP classiques détectés : extraction des fichiers…');
-        for (final root in extractedRoots) {
-          await _copyDirectoryContents(root, destination);
+        for (final volume in volumes) {
+          if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
+          await extractFileToDisk(volume.path, destination.path);
         }
         onFraction?.call(1);
         return ZipMultiResult(
@@ -737,94 +715,148 @@ class ZipMultiService {
         }
       }
 
-      final payloads = <String, File>{};
-      for (final root in extractedRoots) {
-        await for (final entity in root.list(recursive: true, followLinks: false)) {
-          if (entity is! File) continue;
-          final relative = p.relative(entity.path, from: root.path).replaceAll('\\', '/');
-          if (relative == manifestName || relative == volumeInfoName) continue;
-          if (payloads.containsKey(relative)) {
-            throw ZipMultiException('Entrée dupliquée dans le lot : $relative');
-          }
-          payloads[relative] = entity;
-        }
-      }
-
       final files = manifest['files'];
       if (files is! List) {
         throw ZipMultiException('Liste de fichiers absente du manifeste ZipMulti.');
       }
 
+      // Plan de reconstruction : pour chaque entree presente dans les volumes,
+      // on sait vers quel fichier de sortie elle va et a quelle position.
+      final plan = <String, _RebuildSlot>{};
+      final outputs = <String, _RebuildTarget>{};
       var totalOutputBytes = 0;
-      for (final raw in files) {
-        if (raw is! Map) continue;
-        final declared = _asInt(raw['size']);
-        if (declared != null) totalOutputBytes += declared;
-      }
-      if (totalOutputBytes <= 0) totalOutputBytes = 1;
-      var rebuiltBytes = 0;
 
-      var reconstructed = 0;
-      for (var fileIndex = 0; fileIndex < files.length; fileIndex++) {
-        final raw = files[fileIndex];
+      for (final raw in files) {
         if (raw is! Map) continue;
         final item = raw.map((key, value) => MapEntry(key.toString(), value));
         final name = item['name']?.toString();
         if (name == null || name.trim().isEmpty) continue;
         final safeName = p.basename(name);
         final kind = item['kind']?.toString() ?? 'normal';
-        final output = File(p.join(destination.path, safeName));
-        await output.parent.create(recursive: true);
+        totalOutputBytes += _asInt(item['size']) ?? 0;
 
-        if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
-        onProgress?.call(
-          'Reconstruction ${fileIndex + 1}/${files.length} : $safeName',
+        final target = _RebuildTarget(
+          file: File(p.join(destination.path, safeName)),
+          label: safeName,
+          manifestEntry: item,
         );
+        outputs[safeName] = target;
 
         if (kind == 'normal') {
-          final payload = payloads[name] ?? payloads[name.replaceAll('\\', '/')];
-          if (payload == null || !await payload.exists()) {
-            throw ZipMultiException('Fichier manquant dans le lot : $safeName');
-          }
-          await _verifyFileFromManifest(payload, item, label: safeName);
-          await payload.copy(output.path);
+          target.expectedParts = 1;
+          plan[name.replaceAll('\\', '/')] =
+              _RebuildSlot(target: target, order: 0, info: item);
         } else if (kind == 'chunks') {
           final chunks = item['chunks'];
           if (chunks is! List || chunks.isEmpty) {
             throw ZipMultiException('Aucune partie déclarée pour $safeName.');
           }
-
-          final sink = output.openWrite();
-          try {
-            for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-              final chunkInfo = _normalizeChunkInfo(chunks[chunkIndex]);
-              final chunkPath = chunkInfo['path']?.toString();
-              if (chunkPath == null) {
-                throw ZipMultiException('Description de partie invalide pour $safeName.');
-              }
-              final chunk = payloads[chunkPath];
-              if (chunk == null || !await chunk.exists()) {
-                throw ZipMultiException(
-                  'Partie ${chunkIndex + 1}/${chunks.length} manquante pour $safeName.',
-                );
-              }
-              await _verifyFileFromManifest(
-                chunk,
-                chunkInfo,
-                label: '$safeName — partie ${chunkIndex + 1}',
-              );
-              await sink.addStream(chunk.openRead());
+          target.expectedParts = chunks.length;
+          for (var chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+            final info = _normalizeChunkInfo(chunks[chunkIndex]);
+            final chunkPath = info['path']?.toString();
+            if (chunkPath == null) {
+              throw ZipMultiException('Description de partie invalide pour $safeName.');
             }
-          } finally {
-            await sink.close();
+            plan[chunkPath.replaceAll('\\', '/')] =
+                _RebuildSlot(target: target, order: chunkIndex, info: info);
           }
-          await _verifyFileFromManifest(output, item, label: safeName);
         } else {
           throw ZipMultiException('Type de fichier ZipMulti inconnu : $kind');
         }
-        rebuiltBytes += _asInt(item['size']) ?? 0;
-        final done = (rebuiltBytes / totalOutputBytes).clamp(0.0, 1.0);
-        onFraction?.call(_analysisWeight + (1 - _analysisWeight) * done);
+      }
+
+      if (totalOutputBytes <= 0) totalOutputBytes = 1;
+      var rebuiltBytes = 0;
+
+      // Deuxieme passe : les volumes sont traites un par un et chaque partie
+      // est ecrite directement dans le fichier final. Le disque n'a jamais a
+      // heberger le lot entier decompresse, seulement une partie a la fois.
+      final scratch = File(p.join(temp.path, 'partie.bin'));
+      try {
+        for (var i = 0; i < volumes.length; i++) {
+          if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
+          onProgress?.call(
+            'Assemblage depuis le volume ${i + 1}/${volumes.length}…',
+          );
+
+          final input = InputFileStream(volumes[i].path);
+          try {
+            final archive = ZipDecoder().decodeStream(input);
+            for (final entry in archive.files) {
+              if (!entry.isFile) continue;
+              final entryName = entry.name.replaceAll('\\', '/');
+              if (entryName == manifestName || entryName == volumeInfoName) {
+                continue;
+              }
+              final slot = plan[entryName];
+              if (slot == null) continue;
+              if (slot.consumed) {
+                throw ZipMultiException('Entrée dupliquée dans le lot : $entryName');
+              }
+              if (isCancelled?.call() ?? false) throw const ZipMultiCancelled();
+
+              if (slot.order != slot.target.nextPart) {
+                throw ZipMultiException(
+                  'Les parties de ${slot.target.label} arrivent dans le désordre. '
+                  'Vérifiez que tous les volumes du lot sont présents.',
+                );
+              }
+
+              if (await scratch.exists()) await scratch.delete();
+              final output = OutputFileStream(scratch.path);
+              entry.writeContent(output);
+              await output.close();
+
+              await _verifyFileFromManifest(
+                scratch,
+                slot.info,
+                label: slot.target.expectedParts > 1
+                    ? '${slot.target.label} — partie ${slot.order + 1}'
+                    : slot.target.label,
+              );
+
+              final sink = await slot.target.openSink();
+              await sink.addStream(scratch.openRead());
+              await scratch.delete();
+
+              slot.consumed = true;
+              slot.target.nextPart++;
+              rebuiltBytes += _asInt(slot.info['size']) ?? 0;
+              final done = (rebuiltBytes / totalOutputBytes).clamp(0.0, 1.0);
+              onFraction?.call(
+                _analysisWeight + (1 - _analysisWeight) * done,
+              );
+            }
+          } finally {
+            await input.close();
+          }
+        }
+      } finally {
+        for (final target in outputs.values) {
+          await target.closeSink();
+        }
+        if (await scratch.exists()) await scratch.delete();
+      }
+
+      var reconstructed = 0;
+      for (final target in outputs.values) {
+        if (target.nextPart < target.expectedParts) {
+          throw ZipMultiException(
+            'Reconstruction impossible : il manque '
+            '${target.expectedParts - target.nextPart} partie(s) de '
+            '${target.label}.\n\n'
+            'Sur Android, si la recherche automatique ne voit pas les fichiers '
+            'voisins, sélectionnez tous les ZIP du lot en une seule fois.',
+          );
+        }
+        if (target.expectedParts > 1) {
+          await _verifyFileFromManifest(
+            target.file,
+            target.manifestEntry,
+            label: target.label,
+          );
+        }
         reconstructed++;
       }
 
@@ -842,6 +874,54 @@ class ZipMultiService {
       if (await temp.exists()) {
         await temp.delete(recursive: true);
       }
+    }
+  }
+
+  /// Lit les deux fichiers de metadonnees d'un volume sans decompresser le
+  /// reste de son contenu.
+  Future<_VolumeMetadata> _readVolumeMetadata(File volume) async {
+    final input = InputFileStream(volume.path);
+    try {
+      final archive = ZipDecoder().decodeStream(input);
+      Map<String, dynamic>? manifest;
+      String? setId;
+      int? index;
+      int? count;
+
+      for (final entry in archive.files) {
+        if (!entry.isFile) continue;
+        final name = entry.name.replaceAll('\\', '/');
+        if (name != manifestName && name != volumeInfoName) continue;
+
+        final decoded = jsonDecode(utf8.decode(entry.readBytes() ?? <int>[]));
+        if (decoded is! Map<String, dynamic>) {
+          if (name == manifestName) {
+            throw ZipMultiException(
+              'Manifeste ZipMulti invalide dans ${p.basename(volume.path)}.',
+            );
+          }
+          continue;
+        }
+
+        if (name == manifestName) {
+          manifest = decoded;
+          setId ??= decoded['setId']?.toString();
+          count ??= _asInt(decoded['volumeCount']);
+        } else {
+          setId ??= decoded['setId']?.toString();
+          index = _asInt(decoded['index']);
+          count ??= _asInt(decoded['count']);
+        }
+      }
+
+      return _VolumeMetadata(
+        manifest: manifest,
+        setId: setId,
+        index: index,
+        count: count,
+      );
+    } finally {
+      await input.close();
     }
   }
 
@@ -950,24 +1030,6 @@ class ZipMultiService {
     final bn = number(b);
     if (an != bn) return an.compareTo(bn);
     return a.path.compareTo(b.path);
-  }
-
-  Future<void> _copyDirectoryContents(
-    Directory source,
-    Directory destination,
-  ) async {
-    await for (final entity in source.list(recursive: true, followLinks: false)) {
-      final relative = p.relative(entity.path, from: source.path);
-      if (relative == '.') continue;
-
-      final outputPath = p.join(destination.path, relative);
-      if (entity is Directory) {
-        await Directory(outputPath).create(recursive: true);
-      } else if (entity is File) {
-        await File(outputPath).parent.create(recursive: true);
-        await entity.copy(outputPath);
-      }
-    }
   }
 
   Future<String> _sha256File(File file) async {
@@ -1124,4 +1186,69 @@ class PendingSet {
   int get volumeCount => _plan.volumeCount;
 
   int get remaining => volumeCount - volumesDone;
+}
+
+/// Métadonnées lues à la volée dans un volume, sans le décompresser.
+class _VolumeMetadata {
+  const _VolumeMetadata({
+    this.manifest,
+    this.setId,
+    this.index,
+    this.count,
+  });
+
+  final Map<String, dynamic>? manifest;
+  final String? setId;
+  final int? index;
+  final int? count;
+}
+
+/// Fichier en cours de reconstruction, alimenté au fil des volumes.
+class _RebuildTarget {
+  _RebuildTarget({
+    required this.file,
+    required this.label,
+    required this.manifestEntry,
+  });
+
+  final File file;
+  final String label;
+  final Map<String, Object?> manifestEntry;
+
+  /// Nombre de parties attendues : 1 pour un fichier entier.
+  int expectedParts = 1;
+
+  /// Prochaine partie attendue ; sert à détecter un lot incomplet ou désordonné.
+  int nextPart = 0;
+
+  IOSink? _sink;
+
+  Future<IOSink> openSink() async {
+    final existing = _sink;
+    if (existing != null) return existing;
+    await file.parent.create(recursive: true);
+    final sink = file.openWrite();
+    _sink = sink;
+    return sink;
+  }
+
+  Future<void> closeSink() async {
+    final sink = _sink;
+    _sink = null;
+    if (sink != null) await sink.close();
+  }
+}
+
+/// Emplacement d'une entrée d'archive dans le fichier qu'elle reconstitue.
+class _RebuildSlot {
+  _RebuildSlot({
+    required this.target,
+    required this.order,
+    required this.info,
+  });
+
+  final _RebuildTarget target;
+  final int order;
+  final Map<String, Object?> info;
+  bool consumed = false;
 }
