@@ -51,6 +51,10 @@ class ZipMultiService {
   /// Sous-dossier de travail conservant les parties decoupees entre deux
   /// tentatives. Il est efface des que le lot est termine ou abandonne.
   static const String workDirName = '.zipmulti_travail';
+
+  /// Note en clair glissee dans chaque volume, pour le destinataire qui ouvre
+  /// un ZIP sans savoir de quoi il s'agit.
+  static const String readmeName = 'LISEZMOI.txt';
   static const int formatVersion = 2;
 
   /// Part de la progression consacree a l'analyse et au decoupage ; le reste
@@ -395,6 +399,14 @@ class ZipMultiService {
 
       // L'etat de reprise n'est ecrit qu'une fois le plan complet etabli :
       // en dessous, il n'y aurait rien d'utile a reprendre.
+      final readmeFile = await _freshFile(
+        p.join(tempDirectory.path, readmeName),
+      );
+      await readmeFile.writeAsString(
+        _readmeText(safeBaseName, groups.length, advancedSplit),
+        flush: true,
+      );
+
       final plan = _BuildPlan(
         setId: setId,
         baseName: safeBaseName,
@@ -403,6 +415,7 @@ class ZipMultiService {
         fileCount: manifestFiles.length,
         groups: groups,
         manifestPath: manifestFile.path,
+        readmePath: readmeFile.path,
         volumeCount: groups.length,
       );
       await _saveResumeState(outputDirectory, plan, 0);
@@ -531,6 +544,10 @@ class ZipMultiService {
       encoder.create(volumePath, level: DeflateLevel.bestSpeed);
       await encoder.addFile(manifestFile, manifestName, DeflateLevel.bestSpeed);
       await encoder.addFile(volumeInfoFile, volumeInfoName, DeflateLevel.bestSpeed);
+      final readmeFile = File(plan.readmePath);
+      if (await readmeFile.exists()) {
+        await encoder.addFile(readmeFile, readmeName, DeflateLevel.bestSpeed);
+      }
       for (final entry in groups[i]) {
         await encoder.addFile(
           entry.source,
@@ -566,6 +583,43 @@ class ZipMultiService {
           ? '${createdVolumes.length} volume(s) créé(s). Le lot contient ${plan.fileCount} fichier(s), avec manifeste de reconstruction et empreintes SHA-256.'
           : '${createdVolumes.length} ZIP standard(s) créé(s). Les fichiers ne sont pas coupés et chaque volume reste ouvrable séparément.',
     );
+  }
+
+  String _readmeText(String baseName, int volumeCount, bool advancedSplit) {
+    final buffer = StringBuffer()
+      ..writeln('ZipMulti — lot « $baseName »')
+      ..writeln('')
+      ..writeln('Ce partage est composé de $volumeCount fichiers ZIP :')
+      ..writeln('  ${baseName}_001.zip … '
+          '${baseName}_${volumeCount.toString().padLeft(3, '0')}.zip')
+      ..writeln('');
+
+    if (advancedSplit) {
+      buffer
+        ..writeln('Les fichiers volumineux ont été découpés entre plusieurs')
+        ..writeln('volumes. Un décompresseur classique ouvrira chaque ZIP mais')
+        ..writeln('ne saura pas recoller les morceaux.')
+        ..writeln('')
+        ..writeln('POUR RÉCUPÉRER LES FICHIERS D’ORIGINE :')
+        ..writeln('  1. Rassemblez les $volumeCount ZIP dans un même dossier.')
+        ..writeln('  2. Installez ZipMulti (Android ou Windows) :')
+        ..writeln('     https://janintibo-art.github.io/ZipMulti/')
+        ..writeln('  3. Ouvrez l’onglet « Reconstruire », choisissez un des ZIP')
+        ..writeln('     et lancez. Les fichiers sont réassemblés et vérifiés.')
+        ..writeln('')
+        ..writeln('Il faut impérativement les $volumeCount volumes : s’il en')
+        ..writeln('manque un, la reconstruction est impossible.');
+    } else {
+      buffer
+        ..writeln('Aucun fichier n’a été découpé : chaque ZIP peut être ouvert')
+        ..writeln('séparément avec n’importe quel décompresseur.')
+        ..writeln('')
+        ..writeln('ZipMulti permet aussi de tout extraire d’un coup, avec')
+        ..writeln('vérification d’intégrité :')
+        ..writeln('  https://janintibo-art.github.io/ZipMulti/');
+    }
+
+    return buffer.toString();
   }
 
   String _volumePath(Directory directory, String baseName, int number) {
@@ -821,7 +875,9 @@ class ZipMultiService {
             for (final entry in archive.files) {
               if (!entry.isFile) continue;
               final entryName = entry.name.replaceAll('\\', '/');
-              if (entryName == manifestName || entryName == volumeInfoName) {
+              if (entryName == manifestName ||
+                  entryName == volumeInfoName ||
+                  entryName == readmeName) {
                 continue;
               }
               final slot = plan[entryName];
@@ -1134,6 +1190,7 @@ class _BuildPlan {
     required this.fileCount,
     required this.groups,
     required this.manifestPath,
+    required this.readmePath,
     required this.volumeCount,
   });
 
@@ -1144,6 +1201,7 @@ class _BuildPlan {
   final int fileCount;
   final List<List<_PlannedEntry>> groups;
   final String manifestPath;
+  final String readmePath;
   final int volumeCount;
 
   Map<String, Object?> toJson(int volumesDone) => <String, Object?>{
@@ -1154,6 +1212,7 @@ class _BuildPlan {
         'advancedSplit': advancedSplit,
         'fileCount': fileCount,
         'manifestPath': manifestPath,
+        'readmePath': readmePath,
         'volumeCount': volumeCount,
         'volumesDone': volumesDone,
         'groups': groups
@@ -1199,6 +1258,7 @@ class _BuildPlan {
       fileCount: json['fileCount'] is int ? json['fileCount'] as int : 0,
       groups: groups,
       manifestPath: json['manifestPath']?.toString() ?? '',
+      readmePath: json['readmePath']?.toString() ?? '',
       volumeCount: json['volumeCount'] is int ? json['volumeCount'] as int : groups.length,
     );
   }

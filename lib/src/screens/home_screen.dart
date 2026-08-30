@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/storage_locations.dart';
@@ -24,6 +25,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   static const _tutorialSeenKey = 'tutorial_seen_v03';
   static const _pendingDirKey = 'pending_output_dir';
+  static const _lastNameKey = 'last_batch_name';
+  static const _lastSizeKey = 'last_batch_size_mb';
 
   final _service = ZipMultiService();
   SharedPreferencesAsync get _preferences => SharedPreferencesAsync();
@@ -39,6 +42,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _picking = false;
   bool _cancelRequested = false;
   PendingSet? _pending;
+  List<File> _lastVolumes = const [];
+  String? _lastFolderLabel;
   double? _progress;
   int _section = 0;
   String _status = 'Prêt à créer ou reconstruire un lot ZipMulti.';
@@ -57,6 +62,7 @@ class _HomeScreenState extends State<HomeScreen> {
       unawaited(_showTutorialOnFirstLaunch());
     });
     unawaited(_lookForPendingSet());
+    unawaited(_restorePreferences());
   }
 
 
@@ -74,6 +80,55 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (_) {
       // Le tutoriel reste accessible manuellement si les préférences sont indisponibles.
+    }
+  }
+
+  /// Restaure le nom de lot et la taille utilises la fois precedente.
+  Future<void> _restorePreferences() async {
+    try {
+      final name = await _preferences.getString(_lastNameKey);
+      final size = await _preferences.getString(_lastSizeKey);
+      if (!mounted) return;
+      setState(() {
+        if (name != null && name.isNotEmpty) _nameController.text = name;
+        if (size != null && size.isNotEmpty) _sizeController.text = size;
+      });
+    } catch (_) {
+      // Premiere ouverture ou preferences indisponibles.
+    }
+  }
+
+  /// Ouvre la feuille de partage du systeme avec les volumes du dernier lot.
+  Future<void> _shareLastVolumes() async {
+    final volumes = _lastVolumes;
+    if (volumes.isEmpty) return;
+
+    final existing = <XFile>[];
+    for (final volume in volumes) {
+      if (await volume.exists()) existing.add(XFile(volume.path));
+    }
+    if (!mounted) return;
+    if (existing.isEmpty) {
+      _show('Les volumes ne sont plus accessibles à cet emplacement.');
+      return;
+    }
+
+    try {
+      await SharePlus.instance.share(
+        ShareParams(
+          files: existing,
+          subject: 'Partage ZipMulti',
+          text: TutorialScreen.shareMessage,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _show(
+        'Le partage a échoué : $e\n\n'
+        'Beaucoup d’applications refusent un envoi de cette taille. '
+        'Essayez d’envoyer les volumes par petits groupes depuis votre '
+        'gestionnaire de fichiers.',
+      );
     }
   }
 
@@ -122,6 +177,8 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _pending = null;
         _status = result.message;
+        _lastVolumes = result.volumes;
+        _lastFolderLabel = StorageLocations.describe(pending.outputDirectory);
       });
       _show(
         '${result.message}\n\n'
@@ -285,6 +342,8 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final target = await StorageLocations.prepare(_nameController.text);
       await _preferences.setString(_pendingDirKey, target.directory.path);
+      await _preferences.setString(_lastNameKey, _nameController.text.trim());
+      await _preferences.setString(_lastSizeKey, _sizeController.text.trim());
       final result = await _service.createVolumes(
         files: _files,
         outputDirectory: target.directory,
@@ -301,7 +360,11 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       await _preferences.remove(_pendingDirKey);
       if (!mounted) return;
-      setState(() => _status = result.message);
+      setState(() {
+        _status = result.message;
+        _lastVolumes = result.volumes;
+        _lastFolderLabel = StorageLocations.describe(target.directory);
+      });
       _show(
         '${result.message}\n\n'
         'Dossier : ${StorageLocations.describe(target.directory)}\n'
@@ -778,6 +841,23 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Text('Créer le lot ZIP'),
             ),
           ),
+          if (_lastVolumes.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _infoStrip(
+              icon: Icons.check_circle_outline_rounded,
+              text: '${_lastVolumes.length} volume(s) prêt(s)'
+                  '${_lastFolderLabel == null ? '' : ' dans $_lastFolderLabel'}.',
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _shareLastVolumes,
+              icon: const Icon(Icons.ios_share_rounded),
+              label: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text('Envoyer les volumes'),
+              ),
+            ),
+          ],
         ],
       ),
     );
