@@ -25,7 +25,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   static const _tutorialSeenKey = 'tutorial_seen_v03';
-  static const _pendingDirKey = 'pending_output_dir';
+  static const _pendingDirKey = 'pending_work_dir';
   static const _lastNameKey = 'last_batch_name';
   static const _lastSizeKey = 'last_batch_size_mb';
 
@@ -213,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final pending = _pending;
     if (pending == null) return;
     try {
-      await _service.discardPending(pending.outputDirectory);
+      await _service.discardPending(pending);
     } catch (_) {
       // Le dossier a peut-etre deja ete nettoye a la main.
     }
@@ -343,7 +343,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final target = await StorageLocations.prepare(_nameController.text);
-      await _preferences.setString(_pendingDirKey, target.directory.path);
+      final work = await StorageLocations.workDirectory(_nameController.text);
+      await _preferences.setString(_pendingDirKey, work.path);
       await _preferences.setString(_lastNameKey, _nameController.text.trim());
       await _preferences.setString(_lastSizeKey, _sizeController.text.trim());
       final result = await _service.createVolumes(
@@ -352,6 +353,7 @@ class _HomeScreenState extends State<HomeScreen> {
         baseName: _nameController.text,
         maxBytes: (mb * 1024 * 1024).round(),
         advancedSplit: _smartSplit,
+        workDirectory: work,
         onProgress: (message) {
           if (mounted) setState(() => _status = message);
         },

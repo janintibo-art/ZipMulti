@@ -48,10 +48,6 @@ class ZipMultiService {
   /// Etat de reprise depose dans le dossier de sortie pendant la creation.
   static const String resumeName = 'ZIPMULTI_REPRISE.json';
 
-  /// Sous-dossier de travail conservant les parties decoupees entre deux
-  /// tentatives. Il est efface des que le lot est termine ou abandonne.
-  static const String workDirName = '.zipmulti_travail';
-
   /// Note en clair glissee dans chaque volume, pour le destinataire qui ouvre
   /// un ZIP sans savoir de quoi il s'agit.
   static const String readmeName = 'LISEZMOI.txt';
@@ -69,13 +65,13 @@ class ZipMultiService {
   static const int _volumeOverhead = 8 * 1024;
 
   /// Reprend un lot laisse en plan, si son etat est encore exploitable.
-  Future<PendingSet?> findPending(Directory outputDirectory) async {
-    final stateFile = File(p.join(outputDirectory.path, resumeName));
+  Future<PendingSet?> findPending(Directory workDirectory) async {
+    final stateFile = File(p.join(workDirectory.path, resumeName));
     if (!await stateFile.exists()) return null;
     try {
       final decoded = jsonDecode(await stateFile.readAsString());
       if (decoded is! Map<String, dynamic>) return null;
-      final pending = PendingSet._(outputDirectory, decoded);
+      final pending = PendingSet._(workDirectory, decoded);
       if (pending.remaining <= 0) return null;
       return pending;
     } catch (_) {
@@ -84,31 +80,26 @@ class ZipMultiService {
   }
 
   /// Efface l'etat et le dossier de travail, ainsi que les volumes deja ecrits.
-  Future<void> discardPending(Directory outputDirectory) async {
-    final work = Directory(p.join(outputDirectory.path, workDirName));
-    if (await work.exists()) await work.delete(recursive: true);
-
-    final stateFile = File(p.join(outputDirectory.path, resumeName));
-    if (await stateFile.exists()) {
+  Future<void> discardPending(PendingSet pending) async {
+    final output = pending.outputDirectory;
+    for (var i = 1; i <= 999; i++) {
+      final volume = File(_volumePath(output, pending.baseName, i));
+      if (!await volume.exists()) break;
       try {
-        final decoded = jsonDecode(await stateFile.readAsString());
-        if (decoded is Map<String, dynamic>) {
-          final base = decoded['baseName']?.toString();
-          if (base != null) {
-            for (var i = 1; i <= 999; i++) {
-              final volume = File(p.join(
-                outputDirectory.path,
-                '${base}_${i.toString().padLeft(3, '0')}.zip',
-              ));
-              if (!await volume.exists()) break;
-              await volume.delete();
-            }
-          }
-        }
+        await volume.delete();
       } catch (_) {
-        // L'etat est illisible : on se contente de le supprimer.
+        // Volume verrouille : on laisse tomber celui-ci.
       }
-      await stateFile.delete();
+    }
+    try {
+      if (await output.exists() && await output.list().isEmpty) {
+        await output.delete();
+      }
+    } catch (_) {
+      // Dossier non vide ou inaccessible : sans importance.
+    }
+    if (await pending.workDirectory.exists()) {
+      await pending.workDirectory.delete(recursive: true);
     }
   }
 
@@ -176,6 +167,7 @@ class ZipMultiService {
     required String baseName,
     required int maxBytes,
     required bool advancedSplit,
+    required Directory workDirectory,
     void Function(String message)? onProgress,
     void Function(double fraction)? onFraction,
     bool Function()? isCancelled,
@@ -190,10 +182,10 @@ class ZipMultiService {
     await outputDirectory.create(recursive: true);
     final safeBaseName = _sanitizeBaseName(baseName);
     await _ensureNoPreviousSet(outputDirectory, safeBaseName);
-    // Le travail vit desormais a cote des volumes et non dans le dossier
-    // temporaire : c'est ce qui permet de reprendre apres une interruption
-    // sans refaire tout le decoupage.
-    final tempDirectory = Directory(p.join(outputDirectory.path, workDirName));
+    // Le travail vit dans l'espace prive de l'application : il survit a une
+    // fermeture, ce qui permet la reprise, sans subir les regles du stockage
+    // cloisonne d'Android qui s'appliquent a Telechargements.
+    final tempDirectory = workDirectory;
     await _emptyWorkDirectory(tempDirectory);
 
     var volumesStarted = false;
@@ -416,9 +408,10 @@ class ZipMultiService {
         groups: groups,
         manifestPath: manifestFile.path,
         readmePath: readmeFile.path,
+        outputPath: outputDirectory.path,
         volumeCount: groups.length,
       );
-      await _saveResumeState(outputDirectory, plan, 0);
+      await _saveResumeState(tempDirectory, plan, 0);
 
       volumesStarted = true;
       final result = await _writeVolumes(
@@ -431,7 +424,7 @@ class ZipMultiService {
         isCancelled: isCancelled,
       );
 
-      await _cleanUpAfterSuccess(outputDirectory, tempDirectory);
+      await _cleanUpAfterSuccess(tempDirectory);
       return result;
     } catch (_) {
       if (!volumesStarted) {
@@ -439,8 +432,6 @@ class ZipMultiService {
         if (await tempDirectory.exists()) {
           await tempDirectory.delete(recursive: true);
         }
-        final stateFile = File(p.join(outputDirectory.path, resumeName));
-        if (await stateFile.exists()) await stateFile.delete();
       }
       // Sinon tout est conserve volontairement : l'utilisateur pourra reprendre.
       rethrow;
@@ -455,7 +446,7 @@ class ZipMultiService {
     bool Function()? isCancelled,
   }) async {
     final outputDirectory = pending.outputDirectory;
-    final workDirectory = Directory(p.join(outputDirectory.path, workDirName));
+    final workDirectory = pending.workDirectory;
     final plan = pending._plan;
 
     for (final group in plan.groups) {
@@ -485,7 +476,7 @@ class ZipMultiService {
       isCancelled: isCancelled,
     );
 
-    await _cleanUpAfterSuccess(outputDirectory, workDirectory);
+    await _cleanUpAfterSuccess(workDirectory);
     return result;
   }
 
@@ -570,7 +561,7 @@ class ZipMultiService {
       }
 
       // Point de reprise : ce volume est complet et verifie.
-      await _saveResumeState(outputDirectory, plan, number);
+      await _saveResumeState(workDirectory, plan, number);
     }
 
     onFraction?.call(1);
@@ -651,26 +642,21 @@ class ZipMultiService {
   }
 
   Future<void> _saveResumeState(
-    Directory outputDirectory,
+    Directory workDirectory,
     _BuildPlan plan,
     int volumesDone,
   ) async {
-    final stateFile = File(p.join(outputDirectory.path, resumeName));
+    final stateFile = File(p.join(workDirectory.path, resumeName));
     await stateFile.writeAsString(
       jsonEncode(plan.toJson(volumesDone)),
       flush: true,
     );
   }
 
-  Future<void> _cleanUpAfterSuccess(
-    Directory outputDirectory,
-    Directory workDirectory,
-  ) async {
+  Future<void> _cleanUpAfterSuccess(Directory workDirectory) async {
     if (await workDirectory.exists()) {
       await workDirectory.delete(recursive: true);
     }
-    final stateFile = File(p.join(outputDirectory.path, resumeName));
-    if (await stateFile.exists()) await stateFile.delete();
   }
 
   Future<ZipMultiResult> extractVolumes({
@@ -1212,6 +1198,7 @@ class _BuildPlan {
     required this.groups,
     required this.manifestPath,
     required this.readmePath,
+    required this.outputPath,
     required this.volumeCount,
   });
 
@@ -1223,6 +1210,7 @@ class _BuildPlan {
   final List<List<_PlannedEntry>> groups;
   final String manifestPath;
   final String readmePath;
+  final String outputPath;
   final int volumeCount;
 
   Map<String, Object?> toJson(int volumesDone) => <String, Object?>{
@@ -1234,6 +1222,7 @@ class _BuildPlan {
         'fileCount': fileCount,
         'manifestPath': manifestPath,
         'readmePath': readmePath,
+        'outputPath': outputPath,
         'volumeCount': volumeCount,
         'volumesDone': volumesDone,
         'groups': groups
@@ -1280,6 +1269,7 @@ class _BuildPlan {
       groups: groups,
       manifestPath: json['manifestPath']?.toString() ?? '',
       readmePath: json['readmePath']?.toString() ?? '',
+      outputPath: json['outputPath']?.toString() ?? '',
       volumeCount: json['volumeCount'] is int ? json['volumeCount'] as int : groups.length,
     );
   }
@@ -1287,12 +1277,17 @@ class _BuildPlan {
 
 /// Lot commencé puis interrompu, retrouvé au lancement suivant.
 class PendingSet {
-  PendingSet._(this.outputDirectory, Map<String, dynamic> json)
+  PendingSet._(this.workDirectory, Map<String, dynamic> json)
       : _plan = _BuildPlan.fromJson(json),
         volumesDone = json['volumesDone'] is int ? json['volumesDone'] as int : 0;
 
-  final Directory outputDirectory;
+  /// Dossier privé contenant l'état et les parties découpées.
+  final Directory workDirectory;
+
   final _BuildPlan _plan;
+
+  /// Dossier où les volumes terminés sont déposés.
+  Directory get outputDirectory => Directory(_plan.outputPath);
 
   /// Nombre de volumes déjà écrits et vérifiés.
   final int volumesDone;

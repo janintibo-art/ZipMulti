@@ -162,6 +162,32 @@ class StorageLocations {
     }
   }
 
+  /// Dossier de travail, invisible pour l'utilisateur et pour l'index
+  /// multimédia.
+  ///
+  /// Il doit survivre à une fermeture de l'application pour que la reprise soit
+  /// possible, mais surtout pas vivre dans Téléchargements : le stockage
+  /// cloisonné d'Android y impose des règles par type de fichier et MediaStore
+  /// y garde des entrées fantômes, ce qui fait échouer les écritures de façon
+  /// imprévisible en plein traitement.
+  static Future<Directory> workDirectory(String folderName) async {
+    final safe = sanitizeFolderName(folderName);
+    Directory? base;
+
+    if (Platform.isAndroid) {
+      try {
+        base = await getExternalStorageDirectory();
+      } catch (_) {
+        base = null;
+      }
+    }
+    base ??= await getApplicationSupportDirectory();
+
+    final work = Directory(p.join(base.path, 'travail', safe));
+    await work.create(recursive: true);
+    return work;
+  }
+
   /// Chemin affiché à l'utilisateur, raccourci quand c'est possible.
   static String describe(Directory directory) {
     final path = directory.path;
