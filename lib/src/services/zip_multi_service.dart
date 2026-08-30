@@ -108,6 +108,40 @@ class ZipMultiService {
     }
   }
 
+  /// Prepare le dossier de travail sans le supprimer puis le recreer.
+  ///
+  /// Sur le stockage Android emule, enchainer suppression et creation du meme
+  /// chemin laisse le cache du systeme de fichiers incoherent : les ecritures
+  /// suivantes echouent alors avec « File exists ». On vide donc le contenu
+  /// en gardant le dossier lui-meme.
+  Future<void> _emptyWorkDirectory(Directory directory) async {
+    await directory.create(recursive: true);
+    try {
+      await for (final entity in directory.list(followLinks: false)) {
+        try {
+          await entity.delete(recursive: true);
+        } catch (_) {
+          // Une entree recalcitrante sera de toute facon ecrasee plus bas.
+        }
+      }
+    } catch (_) {
+      // Dossier illisible : les ecritures suivantes signaleront le probleme.
+    }
+  }
+
+  /// Renvoie un fichier garanti absent du disque, prêt à être écrit.
+  Future<File> _freshFile(String path) async {
+    final file = File(path);
+    if (await file.exists()) {
+      try {
+        await file.delete();
+      } catch (_) {
+        // Le mode ecriture tronquera le contenu restant.
+      }
+    }
+    return file;
+  }
+
   Future<void> _ensureNoPreviousSet(Directory directory, String baseName) async {
     final pattern = RegExp('^${RegExp.escape(baseName)}_[0-9]{3,}\\.zip\$',
         caseSensitive: false);
@@ -156,8 +190,7 @@ class ZipMultiService {
     // temporaire : c'est ce qui permet de reprendre apres une interruption
     // sans refaire tout le decoupage.
     final tempDirectory = Directory(p.join(outputDirectory.path, workDirName));
-    if (await tempDirectory.exists()) await tempDirectory.delete(recursive: true);
-    await tempDirectory.create(recursive: true);
+    await _emptyWorkDirectory(tempDirectory);
 
     var volumesStarted = false;
 
@@ -249,7 +282,7 @@ class ZipMultiService {
           final partName = '${chunkIndex.toString().padLeft(6, '0')}.part';
           final partDir = Directory(p.join(tempDirectory.path, partsRoot, fileId));
           await partDir.create(recursive: true);
-          chunkFile = File(p.join(partDir.path, partName));
+          chunkFile = await _freshFile(p.join(partDir.path, partName));
           chunkArchiveName = p.posix.join(partsRoot, fileId, partName);
           chunkSink = chunkFile!.openWrite();
         }
@@ -353,7 +386,8 @@ class ZipMultiService {
       final groups = _groupEntries(planned, groupBudget);
       if (groups.isEmpty) groups.add(<_PlannedEntry>[]);
 
-      final manifestFile = File(p.join(tempDirectory.path, manifestName));
+      final manifestFile =
+          await _freshFile(p.join(tempDirectory.path, manifestName));
       await manifestFile.writeAsString(
         jsonPretty.convert(buildManifest(groups.length)),
         flush: true,
@@ -485,7 +519,8 @@ class ZipMultiService {
         'index': number,
         'count': groups.length,
       };
-      final volumeInfoFile = File(p.join(workDirectory.path, 'volume_$number.json'));
+      final volumeInfoFile =
+          await _freshFile(p.join(workDirectory.path, 'volume_$number.json'));
       await volumeInfoFile.writeAsString(jsonEncode(volumeInfo), flush: true);
 
       final volume = File(volumePath);
