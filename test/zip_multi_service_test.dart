@@ -26,6 +26,7 @@ void main() {
         baseName: 'test',
         maxBytes: 1024 * 1024,
         advancedSplit: true,
+        workDirectory: await Directory.systemTemp.createTemp('zipmulti_travail_test_'),
       );
 
       expect(created.volumes.length, greaterThanOrEqualTo(2));
