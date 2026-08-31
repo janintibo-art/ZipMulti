@@ -138,6 +138,7 @@ for activity in activities:
     activity.write_text(package_line + '''
 
 import android.media.MediaScannerConnection
+import android.os.StatFs
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -149,21 +150,34 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mediaChannel)
             .setMethodCallHandler { call, result ->
-                if (call.method == "scan") {
-                    val paths = call.argument<List<String>>("paths")
-                    if (paths.isNullOrEmpty()) {
-                        result.success(false)
-                    } else {
-                        MediaScannerConnection.scanFile(
-                            applicationContext,
-                            paths.toTypedArray(),
-                            null,
-                            null
-                        )
-                        result.success(true)
+                when (call.method) {
+                    "scan" -> {
+                        val paths = call.argument<List<String>>("paths")
+                        if (paths.isNullOrEmpty()) {
+                            result.success(false)
+                        } else {
+                            MediaScannerConnection.scanFile(
+                                applicationContext,
+                                paths.toTypedArray(),
+                                null,
+                                null
+                            )
+                            result.success(true)
+                        }
                     }
-                } else {
-                    result.notImplemented()
+                    "freeSpace" -> {
+                        val path = call.argument<String>("path")
+                        if (path == null) {
+                            result.success(null)
+                        } else {
+                            try {
+                                result.success(StatFs(path).availableBytes)
+                            } catch (error: Exception) {
+                                result.success(null)
+                            }
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
     }

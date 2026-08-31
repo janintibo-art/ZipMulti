@@ -9,6 +9,7 @@ import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/device_storage.dart';
 import '../services/storage_locations.dart';
 import '../services/zip_multi_service.dart';
 import 'tutorial_screen.dart';
@@ -42,6 +43,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _picking = false;
   bool _cancelRequested = false;
   PendingSet? _pending;
+  int? _freeBytes;
   List<File> _lastVolumes = const [];
   String? _lastFolderLabel;
   double? _progress;
@@ -63,6 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     unawaited(_lookForPendingSet());
     unawaited(_restorePreferences());
+    unawaited(_refreshFreeSpace());
   }
 
 
@@ -81,6 +84,27 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {
       // Le tutoriel reste accessible manuellement si les préférences sont indisponibles.
     }
+  }
+
+  Future<void> _refreshFreeSpace() async {
+    final free = await DeviceStorage.freeBytesInDownloads();
+    if (!mounted) return;
+    setState(() => _freeBytes = free);
+  }
+
+  /// Vérifie qu'il reste de quoi travailler avant de lancer un traitement long.
+  ///
+  /// Renvoie null si tout va bien, ou le message à afficher sinon. Quand
+  /// l'espace libre est inconnu — sur Windows, ou si Android refuse de
+  /// répondre — on laisse passer plutôt que de bloquer à tort.
+  String? _spaceProblem({required int required, required String usage}) {
+    final free = _freeBytes;
+    if (free == null || required <= 0) return null;
+    if (free >= required) return null;
+    return 'Espace de stockage insuffisant.\n\n'
+        'Il faut environ ${_formatBytes(required)} pour $usage, '
+        'et il ne reste que ${_formatBytes(free)} dans Téléchargements.\n\n'
+        'Libérez de la place, ou traitez moins de fichiers à la fois.';
   }
 
   /// Restaure le nom de lot et la taille utilises la fois precedente.
@@ -198,6 +222,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
+      unawaited(_refreshFreeSpace());
       if (mounted) {
         setState(() {
           _busy = false;
@@ -326,6 +351,18 @@ class _HomeScreenState extends State<HomeScreen> {
       _show('Sélectionnez au moins un fichier.');
       return;
     }
+
+    await _refreshFreeSpace();
+    // Pic d'occupation : les volumes produits, plus les parties découpées qui
+    // vivent en parallèle dans le dossier de travail jusqu'à la fin.
+    final problem = _spaceProblem(
+      required: (_totalInputBytes * 2.1).round(),
+      usage: 'créer ce lot',
+    );
+    if (problem != null) {
+      _show(problem);
+      return;
+    }
     final mb = double.tryParse(_sizeController.text.replaceAll(',', '.'));
     if (mb == null || mb <= 0) {
       _show('La taille maximale par ZIP est invalide.');
@@ -386,6 +423,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await _lookForPendingSet();
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
+      unawaited(_refreshFreeSpace());
       if (mounted) {
         setState(() {
           _busy = false;
@@ -398,6 +436,24 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _extract() async {
     if (_zipVolumes.isEmpty) {
       _show('Sélectionnez au moins un ZIP du lot.');
+      return;
+    }
+
+    await _refreshFreeSpace();
+    var volumeBytes = 0;
+    for (final volume in _zipVolumes) {
+      try {
+        volumeBytes += await volume.length();
+      } catch (_) {
+        // Volume illisible : signalé plus bas par le service.
+      }
+    }
+    final problem = _spaceProblem(
+      required: (volumeBytes * 1.3).round(),
+      usage: 'reconstruire ce lot',
+    );
+    if (problem != null) {
+      _show(problem);
       return;
     }
 
@@ -441,6 +497,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) _show('Erreur inattendue : $e');
     } finally {
+      unawaited(_refreshFreeSpace());
       if (mounted) {
         setState(() {
           _busy = false;
@@ -794,10 +851,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 enabled: !_busy,
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 onChanged: (_) => setState(() {}),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Taille max / ZIP (Mo)',
-                  prefixIcon: Icon(Icons.straighten_rounded),
+                  prefixIcon: const Icon(Icons.straighten_rounded),
                   hintText: '100',
+                  helperMaxLines: 2,
+                  helperText: _freeSpaceLabel,
                 ),
               );
               if (compact) {
@@ -1089,6 +1148,19 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+  }
+
+  /// Espace restant, affiché sous le champ de taille. Vide tant qu'on ne sait
+  /// pas, pour ne pas afficher un chiffre inventé.
+  String? get _freeSpaceLabel {
+    final free = _freeBytes;
+    if (free == null) return null;
+    final needed = _totalInputBytes > 0 ? (_totalInputBytes * 2.1).round() : 0;
+    if (needed > 0 && free < needed) {
+      return '${_formatBytes(free)} libres — il en faut environ '
+          '${_formatBytes(needed)}';
+    }
+    return '${_formatBytes(free)} libres dans Téléchargements';
   }
 
   Widget _infoStrip({required IconData icon, required String text}) {
